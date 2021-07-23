@@ -2,6 +2,7 @@
 # https://github.com/BenevolentAI/MolBERT/blob/main/molbert/models/base.py
 
 import random
+import logging
 import argparse
 import re
 import argparse
@@ -19,10 +20,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score
 
-from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.loggers import WandbLogger, LearningRateLogger
 
 from transformers import BertTokenizerFast, BertModel, BertForSequenceClassification
-from transformers import TrainingArguments, Trainer
 from transformers import EarlyStoppingCallback
 from torch.utils.data.sampler import WeightedRandomSampler
 from torch.nn import CrossEntropyLoss
@@ -35,6 +35,9 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
 import torch.distributed as dist
 
 import common
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 class BertBaseClassifier(nn.Module):
     def __init__(self, num_labels):
@@ -154,7 +157,8 @@ class LitBertBase(pl.LightningModule):
         }]
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
 
-        num_training_steps = len(self.train_dataloader()) * self.hparams.max_epochs
+        num_batches = len(self.get_datasets()['train']) // self.hparams.batch_size
+        num_training_steps = num_batches * self.hparams.max_epochs
         num_warmup_steps = 0
 
         def lr_lambda(current_step: int):
@@ -211,4 +215,5 @@ parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initi
 args = parser.parse_args()
 
 if __name__ == '__main__':
+    pl.seed_everything(args)
     train_bert_base(args)

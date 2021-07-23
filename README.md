@@ -25,7 +25,11 @@
 - https://github.com/huggingface/transformers/blob/master/examples/pytorch/text-classification/run_glue_no_trainer.py
 
 #TODO: multi seq strategy
-- LSTM
+### LSTM - does not seem to work well perhaps not enough semantic captured from BERT?
+   - f1 around 0.818 (binary case)
+   - f1 around 0.818 (46 labels)
+   - not running new info it seems
+
 - Trasnformer?
 - AVG
 - SUM
@@ -40,3 +44,15 @@ https://gist.github.com/HarshTrivedi/f4e7293e941b17d19058f6fb90ab0fec
 
 # TODO: 
 LSTM: hyperpareameter search?
+check special token option(add_special_tokens)
+
+- https://discuss.pytorch.org/t/how-to-use-my-own-sampler-when-i-already-use-distributedsampler/62143
+
+# NLP augmentation
+https://neptune.ai/blog/data-augmentation-nlp
+
+# Longformer
+https://colab.research.google.com/github/allenai/longformer/blob/master/scripts/convert_model_to_long.ipynb
+
+# unsupervised?
+- masked LM

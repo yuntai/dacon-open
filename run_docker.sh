@@ -14,7 +14,7 @@ FROM ${FROM_IMAGE_NAME}
 
 WORKDIR /workspace
 
-RUN pip install seaborn xgboost statsmodels transformers wandb pytorch_lightning
+RUN pip install seaborn xgboost statsmodels transformers wandb pytorch_lightning torchmetrics
 RUN pip install --upgrade "jupyter_http_over_ws>=0.0.7" && jupyter serverextension enable --py jupyter_http_over_ws
 RUN pip install ipywidgets && jupyter nbextension enable --py widgetsnbextension
 

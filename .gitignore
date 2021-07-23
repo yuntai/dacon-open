@@ -1,3 +1,6 @@
 res/
 __pycache__/
 wandb/
+prep/
+logs/
+lightning_logs/

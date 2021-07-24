@@ -7,9 +7,6 @@ import torch
 import random
 import functools
 
-MODEL_NAME = 'bert-base-multilingual-cased'
-CACHE_DIR = 'bert_ckpts'
-
 TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
 
 # create torch dataset
@@ -134,7 +131,7 @@ def prep_tok(df, add_special_tokens=False):
     return df
 
 # load dataset, clean text, assing cv and tokenize
-@cache_df('baseprep_seed={seed}_maxlen={max_len}.pkl')
+@cache_df('./prep/baseprep_seed={seed}_maxlen={max_len}.pkl')
 def prep(seed=None, max_len=None):
     assert seed is not None and max_len is not None
     dataroot = Path('/mnt/datasets/open')

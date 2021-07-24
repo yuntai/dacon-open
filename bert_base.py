@@ -16,11 +16,11 @@ import numpy as np
 
 import torchmetrics
 from torch.utils.data import DataLoader, Dataset
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score
 
-from pytorch_lightning.loggers import WandbLogger, LearningRateLogger
+from pytorch_lightning.loggers import WandbLogger
 
 from transformers import BertTokenizerFast, BertModel, BertForSequenceClassification
 from transformers import EarlyStoppingCallback
@@ -39,17 +39,34 @@ import common
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-class BertBaseClassifier(nn.Module):
-    def __init__(self, num_labels):
-        super().__init__()
-        self.bert = BertModel.from_pretrained(common.MODEL_NAME, cache_dir=common.CACHE_DIR)
+def get_default_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_len', type=int, default=250)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--gpus', type=int, default=2)
+    parser.add_argument('--cv', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=42)
 
+    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
+    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
+    parser.add_argument('--model_name', type='str', choices=['bert-base-multilingual-cased', 'xlm-roberta-base'], default='bert-base-multilingual-cased')
+    parser.add_argument('--cache_dir', type='str', default="./.cache")
+    parser.add_argument('--wandb_name', type='str', default="bert_base")
+
+    return parser
+
+
+class BertBaseClassifier(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.bert = BertModel.from_pretrained(args.model_name, cache_dir=args.cache_dir)
         config = self.bert.config
-        num_labels = 46
 
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, num_labels)
+        self.classifier = nn.Linear(config.hidden_size, args.num_labels)
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
@@ -72,7 +89,7 @@ class LitBertBase(pl.LightningModule):
         self.save_hyperparameters(hparams)
 
         num_labels = 46
-        self.model = BertBaseClassifier(num_labels)
+        self.model = BertBaseClassifier(args, num_labels)
         self.valid_f1 = torchmetrics.F1(num_classes=num_labels, average='macro')
         self.valid_acc = torchmetrics.Accuracy()
 
@@ -172,48 +189,39 @@ class LitBertBase(pl.LightningModule):
 
     def configure_callbacks(self):
         early_stop = EarlyStopping(
-            monitor="val_f1",
+            monitor="val_loss",
             min_delta=0.00,
-            mode="max",
-            patience=5,
+            mode="min",
+            patience=3,
         )
         checkpoint = ModelCheckpoint(
-            dirpath="bert_base",
+            dirpath=f"./res/bertbase_max_len={self.hparams.max_len}",
             monitor="val_f1",
             save_top_k=5,
             filename='{epoch}-{val_f1:.2f}-{val_loss:.2f}',
             mode='max'
 
         )
-        return [early_stop, checkpoint]
+        lr_monitor = LearningRateMonitor(logging_interval='step')
+        return [early_stop, checkpoint, lr_monitor]
 
 def train_bert_base(args):
     model = LitBertBase(args)
 
+    wandb_logger = WandbLogger(name=args.wandb_name)
     trainer = pl.Trainer(
         gpus=args.gpus,
         amp_level='O2',
         precision=16,
         accelerator='ddp',
         max_epochs=args.max_epochs,
-        checkpoint_callback=False
+        checkpoint_callback=False,
+        logger=wandb_logger,
     )
     trainer.fit(model)
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--max_len', type=int, default=250)
-parser.add_argument('--batch_size', type=int, default=32)
-parser.add_argument('--max_epochs', type=int, default=20)
-parser.add_argument('--gpus', type=int, default=2)
-parser.add_argument('--cv', type=int, default=0)
-parser.add_argument('--seed', type=int, default=42)
-
-parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
-parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-
-args = parser.parse_args()
-
 if __name__ == '__main__':
-    pl.seed_everything(args)
+    args = get_default_parser()
+    args.num_labels = 46
+    pl.seed_everything(args.seed)
     train_bert_base(args)

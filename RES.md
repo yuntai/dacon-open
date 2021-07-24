@@ -8,10 +8,12 @@ early stopping based on F1
 # LSTM w/ [CLS]
 f1 0.699
 
-# Bert BASE no [CLS] max_length(250) CLS Task
-0.66
-
-# Bert BASE no [CLS] max_length(500) CLS Task
-0.649
+# Bert BASE no [CLS] max_length(100) CLS Task
+- weight decay seems helpful
+max_length | f1
+200        | 0.729/0.581
+250        | 0.734/0.54 (weight decay) / more generality? bert_base_250/epoch=12-val_f1=0.73-val_loss=0.54.ckpt
+300        |
+500        | 0.649
 
 # MASKED LM

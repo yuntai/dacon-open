@@ -6,6 +6,7 @@ import re
 import torch
 import random
 import functools
+from transformers import AutoTokenizerFast
 
 TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
 
@@ -72,9 +73,13 @@ def cv_split(df, cv):
 
     return tr_df, va_df
 
-def prep_txt(df):
+def prep_txt(df, include_keywords=True, include_english=True):
 
-    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과', '요약문_한글키워드', '요약문_영문키워드']
+    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
+    if include_keywords:
+        cols += ['요약문_한글키워드']
+        if include_english:
+            cols += ['요약문_영문키워드']
 
     df = df[cols + ['index','label']].copy()
     df.fillna(' ', inplace=True)
@@ -99,8 +104,8 @@ def prep_cv(df, cv=5, seed=42):
 
     return df
 
-def prep_explode(df, max_len):
-    __get_split = functools.partial(get_split, chunk_size=max_len)
+def prep_explode(df, max_seq_len):
+    __get_split = functools.partial(get_split, chunk_size=max_seq_len)
     df['data_split'] = df['data_cleaned'].apply(__get_split)
 
     train_l, label_l, cv_l, index_l, subix_l = [], [], [], [], []
@@ -130,17 +135,26 @@ def prep_tok(df, add_special_tokens=False):
 
     return df
 
-# load dataset, clean text, assing cv and tokenize
-@cache_df('./prep/baseprep_seed={seed}_maxlen={max_len}.pkl')
-def prep(seed=None, max_len=None):
-    assert seed is not None and max_len is not None
-    dataroot = Path('/mnt/datasets/open')
-    train_df = pd.read_csv(dataroot/'train.csv')
+def get_tokenizer(model_name, cache_dir):
+    if model_name in ['monologg/kobert', 'monologg/distilkobert']:
+        from tokenization_kobert import KoBertTokenizer
+        tokenizer = KoBertTokenizer.from_pretrained(model_name)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    df = prep_txt(train_df)
-    df = prep_cv(df, seed=seed)
-    df = prep_explode(df, max_len)
-    df = prep_tok(df)
+    return tokenizer
+
+
+# load dataset, clean text, assing cv and tokenize
+@cache_df('./prep/seed={seed}&max_seq_len={max_seq_len}&modle_name={model_name}.pkl')
+def prep(args):
+    train_df = pd.read_csv(args.dataroot/'train.csv')
+    tokenizer = get_tokenizer(args.model_name, args.cache_dir)
+
+    df = prep_txt(train_df, args.include_keywords, args.include_english)
+    df = prep_cv(df, cv=args.cv, seed=args.seed)
+    df = prep_explode(df, args.max_seq_len)
+    df = prep_tok(df, tokenizer)
 
     return df
 

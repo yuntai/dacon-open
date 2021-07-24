@@ -39,25 +39,6 @@ import common
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-def get_default_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--max_len', type=int, default=250)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=20)
-    parser.add_argument('--gpus', type=int, default=2)
-    parser.add_argument('--cv', type=int, default=0)
-    parser.add_argument('--seed', type=int, default=42)
-
-    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
-    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    parser.add_argument('--model_name', type='str', choices=['bert-base-multilingual-cased', 'xlm-roberta-base'], default='bert-base-multilingual-cased')
-    parser.add_argument('--cache_dir', type='str', default="./.cache")
-    parser.add_argument('--wandb_name', type='str', default="bert_base")
-
-    return parser
-
-
 class BertBaseClassifier(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -221,7 +202,8 @@ def train_bert_base(args):
     trainer.fit(model)
 
 if __name__ == '__main__':
-    args = get_default_parser()
+    from common import get_parser
+    args = get_parser()
     args.num_labels = 46
     pl.seed_everything(args.seed)
     train_bert_base(args)

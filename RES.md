@@ -13,7 +13,7 @@ f1 0.699
 max_length | f1
 200        | 0.729/0.581
 250        | 0.734/0.54 (weight decay) / more generality? bert_base_250/epoch=12-val_f1=0.73-val_loss=0.54.ckpt
-300        |
+300        | 0.70/0.43
 500        | 0.649
 
 # MASKED LM

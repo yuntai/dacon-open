@@ -234,9 +234,8 @@ def train_bert_base(args):
     trainer.fit(model)
 
 if __name__ == '__main__':
-    parser = get_default_parser()
-    args = parser.parse()
-
+    from common import get_parser
+    args = get_parser()
     args.num_labels = 46
     args.dataroot = Path(args.dataroot)
 

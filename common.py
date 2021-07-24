@@ -162,3 +162,21 @@ def get_dataset(df):
     X = df[TOK_COLS]
     y = df['label'].values.tolist()
     return OpenDataset(X, y)
+
+def get_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_len', type=int, default=250)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--gpus', type=int, default=2)
+    parser.add_argument('--cv', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=42)
+
+    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
+    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
+    parser.add_argument('--model_name', type='str', choices=['bert-base-multilingual-cased', 'xlm-roberta-base'], default='bert-base-multilingual-cased')
+    parser.add_argument('--cache_dir', type='str', default="./.cache")
+    parser.add_argument('--wandb_name', type='str', default="bert_base")
+
+    return parser

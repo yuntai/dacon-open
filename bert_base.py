@@ -39,9 +39,16 @@ import common
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-def get_default_parser():
+def get_parser():
+    MODELS = [
+        'bert-base-multilingual-cased',
+        'xlm-roberta-base',
+        'monologg/kobert',
+        'monologg/distilkobert'
+    ]
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--max_len', type=int, default=250)
+    parser.add_argument('--max_seq_len', type=int, default=250)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--max_epochs', type=int, default=20)
     parser.add_argument('--gpus', type=int, default=2)
@@ -51,18 +58,24 @@ def get_default_parser():
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    parser.add_argument('--model_name', type='str', choices=['bert-base-multilingual-cased', 'xlm-roberta-base'], default='bert-base-multilingual-cased')
+    parser.add_argument('--model_name', type='str', choices=MODELS, default='bert-base-multilingual-cased')
     parser.add_argument('--cache_dir', type='str', default="./.cache")
     parser.add_argument('--wandb_name', type='str', default="bert_base")
+    parser.add_argument('--dataroot', type='str', default="/mnt/datasets/open")
+    parser.add_argument('--include_keywords', type=bool, default=False)
+    parser.add_argument('--include_english', type=bool, default=False)
+    parser.add_argument('--dataroot', type=bool, default="/mnt/datasets/open")
 
     return parser
 
+def get_model(args):
+    return AutoModel.from_pretrained(args.model_name, cache_dir=args.cached_dir)
 
 class BertBaseClassifier(nn.Module):
     def __init__(self, args):
         super().__init__()
-        self.bert = BertModel.from_pretrained(args.model_name, cache_dir=args.cache_dir)
-        config = self.bert.config
+        self.m = AutoModel.from_pretrained(args.model_name, cache_dir=args.cache_dir)
+        config = self.m.config
 
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -73,7 +86,7 @@ class BertBaseClassifier(nn.Module):
 
 
     def forward(self, input_ids, token_type_ids, attention_mask):
-        output = self.bert(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
+        output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
         x = output['last_hidden_state'].mean(axis=1)
         x = self.activation(x)
 
@@ -142,12 +155,12 @@ class LitBertBase(pl.LightningModule):
 
     def prepare_data(self):
         from common import prep
-        prep(seed=self.hparams.seed, max_len=self.hparams.max_len)
+        prep(seed=self.hparams.seed, max_seq_len=self.hparams.max_seq_len)
 
     def load_datasets(self):
         from common import prep, cv_split, get_weights, get_dataset
 
-        df = prep(seed=self.hparams.seed, max_len=self.hparams.max_len)
+        df = prep(seed=self.hparams.seed, max_seq_len=self.hparams.max_seq_len, model_name=self.hparams.model_name)
         num_classes = df.label.nunique()
         assert sorted(df.label.unique().tolist()) == list(range(num_classes))
 
@@ -195,10 +208,10 @@ class LitBertBase(pl.LightningModule):
             patience=3,
         )
         checkpoint = ModelCheckpoint(
-            dirpath=f"./res/bertbase_max_len={self.hparams.max_len}",
+            dirpath=f"./res/model_name={self.hparams.model_name}&max_seq_len={self.hparams.max_seq_len}",
             monitor="val_f1",
             save_top_k=5,
-            filename='{epoch}-{val_f1:.2f}-{val_loss:.2f}',
+            filename='{epoch}-{val_loss:.3f}-{val_f1:.2f}',
             mode='max'
 
         )
@@ -221,7 +234,11 @@ def train_bert_base(args):
     trainer.fit(model)
 
 if __name__ == '__main__':
-    args = get_default_parser()
+    parser = get_default_parser()
+    args = parser.parse()
+
     args.num_labels = 46
+    args.dataroot = Path(args.dataroot)
+
     pl.seed_everything(args.seed)
     train_bert_base(args)

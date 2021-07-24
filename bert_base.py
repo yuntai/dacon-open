@@ -22,11 +22,11 @@ from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_sc
 
 from pytorch_lightning.loggers import WandbLogger
 
-from transformers import BertTokenizerFast, BertModel, BertForSequenceClassification
+from transformers import BertForSequenceClassification
 from transformers import EarlyStoppingCallback
 from torch.utils.data.sampler import WeightedRandomSampler
 from torch.nn import CrossEntropyLoss
-from transformers import get_scheduler
+from transformers import get_scheduler, AutoModel
 from transformers import AdamW
 from tqdm.auto import tqdm
 import pytorch_lightning as pl
@@ -40,12 +40,6 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 def get_parser():
-    MODELS = [
-        'bert-base-multilingual-cased',
-        'xlm-roberta-base',
-        'monologg/kobert',
-        'monologg/distilkobert'
-    ]
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_seq_len', type=int, default=250)
@@ -58,13 +52,15 @@ def get_parser():
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    parser.add_argument('--model_name', type='str', choices=MODELS, default='bert-base-multilingual-cased')
-    parser.add_argument('--cache_dir', type='str', default="./.cache")
-    parser.add_argument('--wandb_name', type='str', default="bert_base")
-    parser.add_argument('--dataroot', type='str', default="/mnt/datasets/open")
-    parser.add_argument('--include_keywords', type=bool, default=False)
-    parser.add_argument('--include_english', type=bool, default=False)
-    parser.add_argument('--dataroot', type=bool, default="/mnt/datasets/open")
+    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
+    parser.add_argument('--model_name', choices=MODELS, default='bert-base-multilingual-cased')
+    parser.add_argument('--cache_dir', type=str, default="./.cache")
+    parser.add_argument('--wandb_name', type=str, default="bert_base")
+    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
+    #TODO: store action boolean?
+    parser.add_argument('--include_keywords', type=int, default=1)
+    parser.add_argument('--include_english', type=int, default=0)
+    parser.add_argument('--cv_size', type=int, default=5)
 
     return parser
 
@@ -96,13 +92,13 @@ class BertBaseClassifier(nn.Module):
         return logits
 
 class LitBertBase(pl.LightningModule):
-    def __init__(self, hparams, *args, **kwargs):
+    def __init__(self, args):
         super().__init__()
 
-        self.save_hyperparameters(hparams)
+        self.save_hyperparameters(args)
 
         num_labels = 46
-        self.model = BertBaseClassifier(args, num_labels)
+        self.model = BertBaseClassifier(args)
         self.valid_f1 = torchmetrics.F1(num_classes=num_labels, average='macro')
         self.valid_acc = torchmetrics.Accuracy()
 
@@ -155,12 +151,12 @@ class LitBertBase(pl.LightningModule):
 
     def prepare_data(self):
         from common import prep
-        prep(seed=self.hparams.seed, max_seq_len=self.hparams.max_seq_len)
+        prep(self.hparams)
 
     def load_datasets(self):
         from common import prep, cv_split, get_weights, get_dataset
 
-        df = prep(seed=self.hparams.seed, max_seq_len=self.hparams.max_seq_len, model_name=self.hparams.model_name)
+        df = prep(self.hparams)
         num_classes = df.label.nunique()
         assert sorted(df.label.unique().tolist()) == list(range(num_classes))
 
@@ -234,8 +230,8 @@ def train_bert_base(args):
     trainer.fit(model)
 
 if __name__ == '__main__':
-    from common import get_parser
-    args = get_parser()
+    parser = get_parser()
+    args = parser.parse_args()
     args.num_labels = 46
     args.dataroot = Path(args.dataroot)
 

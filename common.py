@@ -1,12 +1,12 @@
 from pathlib import Path
+import argparse
 import pandas as pd
-from transformers import BertTokenizerFast
+from transformers import AutoTokenizer
 from torch.utils.data import Dataset
 import re
 import torch
 import random
 import functools
-from transformers import AutoTokenizerFast
 
 TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
 
@@ -39,8 +39,8 @@ def get_split(text1, chunk_size=250, overlap_pct=0.25):
 
 def cache_df(fntmpl):
     def decorator(func):
-        def wrapper(*args, **kwargs):
-            fn = fntmpl.format(**kwargs)
+        def wrapper(args):
+            fn = fntmpl.format(vars(args))
             print(f"{fn}" +  (' ' if Path(fn).exists() else ' NOT ') + "FOUND")
             if Path(fn).exists():
                 print(f"reading from {fn} ...")
@@ -93,11 +93,11 @@ def prep_txt(df, include_keywords=True, include_english=True):
     return df
 
 # split train data to 5 set
-def prep_cv(df, cv=5, seed=42):
+def prep_cv(df, cv=0, cv_size=5, seed=42):
     indices = list(df.index)
     random.Random(seed).shuffle(indices)
-    sz = df.shape[0]//cv
-    for ix in range(cv-1):
+    sz = df.shape[0]//cv_size
+    for ix in range(cv_size-1):
         df.loc[indices[ix*sz:(ix+1)*sz], 'cv'] = ix
     df.loc[indices[(ix+1)*sz:], 'cv'] = ix+1
     df['cv'] = df.cv.astype(int)
@@ -121,8 +121,7 @@ def prep_explode(df, max_seq_len):
     return pd.DataFrame({'index': index_l, 'subix': subix_l, 'data':train_l, 'label':label_l, 'cv': cv_l})
 
 # tokenize
-def prep_tok(df, add_special_tokens=False):
-    tokenizer = BertTokenizerFast.from_pretrained(MODEL_NAME, cache_dir=CACHE_DIR, do_lower_case=False)
+def prep_tok(df, tokenizer, add_special_tokens=False):
     kwargs = {
         'add_special_tokens': add_special_tokens,
         'padding': True,
@@ -135,48 +134,35 @@ def prep_tok(df, add_special_tokens=False):
 
     return df
 
-def get_tokenizer(model_name, cache_dir):
+def get_tokenizer(model_name, **kwargs):
     if model_name in ['monologg/kobert', 'monologg/distilkobert']:
         from tokenization_kobert import KoBertTokenizer
-        tokenizer = KoBertTokenizer.from_pretrained(model_name)
+        tokenizer = KoBertTokenizer.from_pretrained(model_name, **kwargs)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
 
     return tokenizer
 
-
-# load dataset, clean text, assing cv and tokenize
-@cache_df('./prep/seed={seed}&max_seq_len={max_seq_len}&modle_name={model_name}.pkl')
 def prep(args):
-    train_df = pd.read_csv(args.dataroot/'train.csv')
-    tokenizer = get_tokenizer(args.model_name, args.cache_dir)
+    model_name = args.model_name.replace('/', '-')
+    cache_path = f'./prep/{args.seed=}&{args.max_seq_len=}&{model_name=}&{args.include_english=}&{args.include_keywords=}.pkl'
+    cache_path = cache_path.replace('args.','')
+    if Path(cache_path).exists():
+        print(f"reading from {cache_path} ...")
+        df = pd.read_pickle(cache_path)
+    else:
+        train_df = pd.read_csv(args.dataroot/'train.csv')
+        tokenizer = get_tokenizer(args.model_name, cache_dir=args.cache_dir, do_lower_case=False)
 
-    df = prep_txt(train_df, args.include_keywords, args.include_english)
-    df = prep_cv(df, cv=args.cv, seed=args.seed)
-    df = prep_explode(df, args.max_seq_len)
-    df = prep_tok(df, tokenizer)
-
+        df = prep_txt(train_df, args.include_keywords, args.include_english)
+        df = prep_cv(df, cv_size=args.cv_size, cv=args.cv, seed=args.seed)
+        df = prep_explode(df, args.max_seq_len)
+        df = prep_tok(df, tokenizer)
+        print(f"saving to {cache_path} ...")
+        df.to_pickle(cache_path)
     return df
 
 def get_dataset(df):
     X = df[TOK_COLS]
     y = df['label'].values.tolist()
     return OpenDataset(X, y)
-
-def get_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--max_len', type=int, default=250)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=20)
-    parser.add_argument('--gpus', type=int, default=2)
-    parser.add_argument('--cv', type=int, default=0)
-    parser.add_argument('--seed', type=int, default=42)
-
-    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
-    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    parser.add_argument('--model_name', type='str', choices=['bert-base-multilingual-cased', 'xlm-roberta-base'], default='bert-base-multilingual-cased')
-    parser.add_argument('--cache_dir', type='str', default="./.cache")
-    parser.add_argument('--wandb_name', type='str', default="bert_base")
-
-    return parser

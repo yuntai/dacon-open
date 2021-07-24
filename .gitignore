@@ -4,3 +4,4 @@ wandb/
 prep/
 logs/
 lightning_logs/
+.cache/

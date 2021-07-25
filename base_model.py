@@ -71,6 +71,7 @@ def get_parser():
 
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open')
+    parser.add_argument('--name', type=str, default=None)
 
     return parser
 
@@ -234,7 +235,8 @@ def train_base_model(args):
     model = LitBaseModel(args)
 
     wandb_logger = WandbLogger(
-        project=args.project
+        project=args.project,
+        name=args.name
     )
     trainer = pl.Trainer(
         gpus=args.gpus,

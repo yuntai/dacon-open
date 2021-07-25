@@ -58,3 +58,12 @@ https://colab.research.google.com/github/allenai/longformer/blob/master/scripts/
 # unsupervised?
 - masked LM
 - permute keywords?
+
+# loss/acc/f1 reading
+
+# model sizes
+[('bert-base-multilingual-cased', 177853440, 177.85344),
+ ('xlm-roberta-base', 278043648, 278.043648),
+ ('xlm-roberta-large', 559890432, 559.890432),
+ ('monologg/kobert', 92186880, 92.18688),
+ ('monologg/distilkobert', 27803904, 27.803904)]

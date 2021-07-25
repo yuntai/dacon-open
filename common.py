@@ -8,7 +8,8 @@ import torch
 import random
 import functools
 
-TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
+#TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
+TOK_COLS = ['input_ids', 'attention_mask']
 
 # create torch dataset
 class OpenDataset(Dataset):
@@ -130,7 +131,8 @@ def prep_tok(df, tokenizer, add_special_tokens=False):
     }
     toks = tokenizer(df['data'].values.tolist(), **kwargs)
     for k in TOK_COLS:
-        df[k] = toks[k]
+        if k in toks: #ROBERTA doen't have token_type_id
+            df[k] = toks[k]
 
     return df
 

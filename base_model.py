@@ -55,7 +55,7 @@ def get_parser():
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
+    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'xlm-roberta-large', 'monologg/kobert', 'monologg/distilkobert']
     parser.add_argument('--base_model', choices=MODELS, default='bert-base-multilingual-cased')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
@@ -65,7 +65,7 @@ def get_parser():
     parser.set_defaults(use_keywords=True)
     parser.add_argument('--use_english', dest='use_english', action='store_true')
     parser.add_argument('--no_use_english', dest='use_english', action='store_false')
-    parser.set_defaults(use_english=False)
+    parser.set_defaults(use_english=True)
 
     parser.add_argument('--cv_size', type=int, default=5)
 
@@ -89,7 +89,7 @@ class BaseClassifier(nn.Module):
         self.classifier.bias.data.zero_()
 
 
-    def forward(self, input_ids, token_type_ids, attention_mask):
+    def forward(self, input_ids=None, token_type_ids=None, attention_mask=None):
         output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
         x = output['last_hidden_state'].mean(axis=1)
         x = self.activation(x)

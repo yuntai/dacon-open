@@ -7,6 +7,7 @@ import argparse
 import re
 import argparse
 from pathlib import Path
+import os
 
 import torch
 import torch.nn as nn
@@ -35,6 +36,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
 import torch.distributed as dist
 
 import common
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -241,6 +244,8 @@ def train_base_model(args):
         max_epochs=args.max_epochs,
         checkpoint_callback=False,
         logger=wandb_logger,
+        replace_sampler_ddp=False,
+        val_check_interval=0.5,
     )
     trainer.fit(model)
 

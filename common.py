@@ -134,32 +134,34 @@ def prep_tok(df, tokenizer, add_special_tokens=False):
 
     return df
 
-def get_tokenizer(model_name, **kwargs):
-    if model_name in ['monologg/kobert', 'monologg/distilkobert']:
+def get_tokenizer(base_model, **kwargs):
+    if base_model in ['monologg/kobert', 'monologg/distilkobert']:
         from tokenization_kobert import KoBertTokenizer
-        tokenizer = KoBertTokenizer.from_pretrained(model_name, **kwargs)
+        tokenizer = KoBertTokenizer.from_pretrained(base_model, **kwargs)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(base_model, **kwargs)
 
     return tokenizer
 
-def prep(args):
-    model_name = args.model_name.replace('/', '-')
-    cache_path = f'./prep/{args.seed=}&{args.max_seq_len=}&{model_name=}&{args.include_english=}&{args.include_keywords=}.pkl'
-    cache_path = cache_path.replace('args.','')
+def use_cache(func, cache_path, *args, **kwargs):
     if Path(cache_path).exists():
-        print(f"reading from {cache_path} ...")
+        print(f"{cache_path} FOUND")
         df = pd.read_pickle(cache_path)
     else:
-        train_df = pd.read_csv(args.dataroot/'train.csv')
-        tokenizer = get_tokenizer(args.model_name, cache_dir=args.cache_dir, do_lower_case=False)
-
-        df = prep_txt(train_df, args.include_keywords, args.include_english)
-        df = prep_cv(df, cv_size=args.cv_size, cv=args.cv, seed=args.seed)
-        df = prep_explode(df, args.max_seq_len)
-        df = prep_tok(df, tokenizer)
+        print(f"{cache_path} NOT FOUND")
+        df = func(*args, **kwargs)
         print(f"saving to {cache_path} ...")
         df.to_pickle(cache_path)
+    return df
+
+def prep(args):
+    train_df = pd.read_csv(args.dataroot/'train.csv')
+    tokenizer = get_tokenizer(args.base_model, cache_dir=args.cache_dir, do_lower_case=False)
+
+    df = prep_txt(train_df, args.use_keywords, args.use_english)
+    df = prep_cv(df, cv_size=args.cv_size, cv=args.cv, seed=args.seed)
+    df = prep_explode(df, args.max_seq_len)
+    df = prep_tok(df, tokenizer)
     return df
 
 def get_dataset(df):

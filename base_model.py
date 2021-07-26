@@ -223,9 +223,8 @@ class LitBaseModel(pl.LightningModule):
             dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
             monitor="val_loss",
             save_top_k=3,
-            filename='{epoch}-{val_loss:.3f}-{val_f1:.2f}',
-            mode='max'
-
+            filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
+            mode='min'
         )
         lr_monitor = LearningRateMonitor(logging_interval='step')
 

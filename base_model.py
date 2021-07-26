@@ -19,7 +19,8 @@ import torchmetrics
 from torch.utils.data import DataLoader, Dataset
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score
+from sklearn.metrics import classification_report
+
 
 from pytorch_lightning.loggers import WandbLogger
 
@@ -76,6 +77,8 @@ def get_parser():
     return parser
 
 class BaseClassifier(nn.Module):
+
+
     def __init__(self, args):
         super().__init__()
         self.m = AutoModel.from_pretrained(args.base_model, cache_dir=args.cache_dir)
@@ -99,7 +102,42 @@ class BaseClassifier(nn.Module):
 
         return logits
 
+
 class LitBaseModel(pl.LightningModule):
+    @staticmethod
+    def load_from_ckpt(ckpt_path):
+        ckpt = torch.load(ckpt_path)
+        args = argparse.Namespace(**ckpt['hyper_parameters'])
+        model = LitBaseModel(args)
+        state_dict = ckpt['state_dict']
+        model.load_state_dict(state_dict)
+        return model, args
+
+    @staticmethod
+    def eval_from_ckpt(ckpt_path):
+        from common import prep, cv_split, get_dataset, with_cache
+        m, args = LitBaseModel.load_from_ckpt(ckpt_path)
+        m.freeze().eval().cuda()
+
+        df = with_cache(prep, m.cache_path)(args)
+        _, va_df = cv_split(df, args.cv)
+        va_ds = get_dataset(va_df)
+        va_loader = DataLoader(va_ds, batch_size=32, shuffle=False)
+
+        preds, labels = [], []
+        hidden_states = []
+        with torch.no_grad():
+            for x in tqdm(va_loader):
+                label = x.pop('labels')
+                item = {k:v.to('cuda') for k, v in x.items()}
+                logits = m(item)
+                preds.append(logits.cpu().argmax(axis=-1))
+                labels.append(label)
+        preds = torch.cat(preds)
+        labels = torch.cat(labels)
+        print(classification_report(labels, preds))
+        return (preds, labels)
+
     def __init__(self, args):
         super().__init__()
 
@@ -116,8 +154,8 @@ class LitBaseModel(pl.LightningModule):
         cache_path = f'./prep/{args.seed=}&{args.max_seq_len=}&{base_model=}&{args.use_keywords=}&{args.use_english=}.pkl'
         self.cache_path = cache_path.replace('args.','')
 
-    def forward(self, x):
-        return self.model(x).argmax(dim=1)
+    def forward(self, batch):
+        return self.model(**batch)
 
     def validation_step(self, batch, batch_idx):
         labels = batch.pop("labels")
@@ -250,12 +288,19 @@ def train_base_model(args):
     )
     trainer.fit(model)
 
-if __name__ == '__main__':
-    parser = get_parser()
-    args = parser.parse_args()
-    args.num_labels = 46
-    args.dataroot = Path(args.dataroot)
+def feature_extract(args) -> pd.DataFrame:
+    model = LitBaseModel.load_from_checkpoint(args.ckpt)
+    model.eval()
 
-    pl.seed_everything(args.seed)
+#if __name__ == '__main__':
+#    parser = get_parser()
+#    args = parser.parse_args()
+#    args.num_labels = 46
+#    args.dataroot = Path(args.dataroot)
+#
+#    pl.seed_everything(args.seed)
+#
+#    train_base_model(args)
 
-    train_base_model(args)
+ckpt = './res/base_model=xlm-roberta-large&max_seq_len=250/epoch=2-val_loss=1.055-val_f1=0.02.ckpt'
+LitBaseModel.eval_from_ckpt(ckpt)

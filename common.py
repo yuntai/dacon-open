@@ -145,16 +145,18 @@ def get_tokenizer(base_model, **kwargs):
 
     return tokenizer
 
-def use_cache(func, cache_path, *args, **kwargs):
-    if Path(cache_path).exists():
-        print(f"{cache_path} FOUND")
-        df = pd.read_pickle(cache_path)
-    else:
-        print(f"{cache_path} NOT FOUND")
-        df = func(*args, **kwargs)
-        print(f"saving to {cache_path} ...")
-        df.to_pickle(cache_path)
-    return df
+def with_cache(func, cache_path):
+    def __inner(*args, **kwargs):
+        if Path(cache_path).exists():
+            print(f"{cache_path} FOUND")
+            df = pd.read_pickle(cache_path)
+        else:
+            print(f"{cache_path} NOT FOUND")
+            df = func(*args, **kwargs)
+            print(f"saving to {cache_path} ...")
+            df.to_pickle(cache_path)
+        return df
+    return __inner
 
 def prep(args):
     train_df = pd.read_csv(args.dataroot/'train.csv')

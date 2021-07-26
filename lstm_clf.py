@@ -32,36 +32,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import classification_report
 from  torch.nn.utils.rnn import pack_padded_sequence
 
-# Define Trainer parameters
-def compute_metrics(p):
-    pred, labels = p
-    pred = np.argmax(pred, axis=1)
-
-    #accuracy = accuracy_score(y_true=labels, y_pred=pred)
-    #recall = recall_score(y_true=labels, y_pred=pred, average='macro')
-    #precision = precision_score(y_true=labels, y_pred=pred, average='macro')
-    f1 = f1_score(y_true=labels, y_pred=pred, average='macro')
-
-    return {"f1": f1}
-    #return {"accuracy": accuracy, "precision": precision, "recall": recall, "f1": f1}
-
-def get_trainer_klass(weights):
-    sz = len(weights)
-    class WeightSamplingTrainer(Trainer):
-        def get_train_dataloader(self) -> DataLoader:
-            train_sampler = WeightedRandomSampler(weights, sz)
-            return DataLoader(
-                self.train_dataset,
-                batch_size=self.args.train_batch_size,
-                sampler=train_sampler,
-                collate_fn=self.data_collator,
-                drop_last=self.args.dataloader_drop_last,
-                num_workers=self.args.dataloader_num_workers,
-                pin_memory=self.args.dataloader_pin_memory,
-            )
-
-    return WeightSamplingTrainer
-
 class OpenClassifier(nn.Module):
     def __init__(self, num_labels):
         super().__init__()
@@ -349,18 +319,22 @@ class LitOpenSequence(pl.LightningModule):
         return [early_stop_callback, mc]
 
 
-def feature_extract(ckpt, seed=42, cv=0):
-    df = prep(seed)
+def feature_extract(args):
+    from common import prep, get_dataset
 
-    ds = get_dataset(df)
-    loader = DataLoader(ds, batch_size=64, shuffle=False, num_workers=16)
+    __prep = use_cache(common.prep, cache_path)
+    df = __prep(args)
 
-    m = BertForSequenceClassification.from_pretrained(ckpt)
+    ds = common.get_dataset(df)
+    dl = DataLoader(ds, batch_size=64, shuffle=False, num_workers=16)
+
+    m = BertForSequenceClassification.from_pretrained(args.ckpt)
     m.eval()
     m.cuda()
     hidden_states = []
+
     with torch.no_grad():
-        for x in loader:
+        for x in dl:
             item = {k:v.to('cuda') for k, v in x.items()}
             res = m(**item, output_hidden_states=True)
             # last hidden state, first token [CLS]

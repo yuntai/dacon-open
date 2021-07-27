@@ -43,7 +43,8 @@ def get_parser():
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    CKPT = './res/base_model=xlm-roberta-base&max_seq_len=250/epoch=3-step=18767-val_loss=0.337-val_f1=0.673.ckpt'
+    #CKPT = './res/base_model=xlm-roberta-base&max_seq_len=250/epoch=3-step=18767-val_loss=0.337-val_f1=0.673.ckpt'
+    CKPT = "./res/bertbase_max_len=250/epoch=16-val_f1=0.74-val_loss=0.59.ckpt"
     parser.add_argument('--ckpt', type=str, default=CKPT)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
@@ -145,10 +146,10 @@ class LitOpenSeq(pl.LightningModule):
             module.weight.data.fill_(1.0)
 
     def prepare_data(self):
-        with_cache(LitBaseModel.extract_feature, self.cache_path)(args.ckpt)
+        with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.ckpt)
 
     def load_datasets(self):
-        df = with_cache(LitBaseModel.extract_feature, self.cache_path)(args.ckpt)
+        df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.ckpt)
         tr_df, va_df = cv_split(df, self.hparams.cv)
         tr_df.loc[tr_df.label > 0, 'label'] = 1
         va_df.loc[va_df.label > 0, 'label'] = 1
@@ -199,11 +200,12 @@ class LitOpenSeq(pl.LightningModule):
         self.val_precision(preds, labels)
         self.val_recall(preds, labels)
 
-        self.log('val_acc', self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_f1', self.val_f1, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_precision', self.val_precision, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_recall', self.val_recall, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_acc', self.val_acc, **kwargs)
+        self.log('val_f1', self.val_f1, **kwargs)
+        self.log('val_precision', self.val_precision, **kwargs)
+        self.log('val_recall', self.val_recall, **kwargs)
+        self.log('val_loss', loss, **kwargs)
 
     def training_step(self, batch, batch_idx):
         x, seq_len, labels = batch

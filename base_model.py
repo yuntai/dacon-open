@@ -77,10 +77,9 @@ def get_parser():
     return parser
 
 class BaseClassifier(nn.Module):
-
-
     def __init__(self, args):
         super().__init__()
+        print("args=", args)
         self.m = AutoModel.from_pretrained(args.base_model, cache_dir=args.cache_dir)
         config = self.m.config
 
@@ -120,7 +119,6 @@ class LitBaseModel(pl.LightningModule):
         m.eval().cuda().freeze()
 
         df = with_cache(prep, m.cache_path)(args)
-        #tr_df, _ = cv_split(df, args.cv)
         ds = get_dataset(df)
         dl = DataLoader(ds, batch_size=128, shuffle=False)
 
@@ -176,8 +174,11 @@ class LitBaseModel(pl.LightningModule):
 
         num_labels = 46
         self.model = BaseClassifier(args)
-        self.valid_f1 = torchmetrics.F1(num_classes=num_labels, average='macro')
-        self.valid_acc = torchmetrics.Accuracy()
+        kwargs = {'num_classes': self.num_classes, 'average':'macro'}
+        self.val_f1 = torchmetrics.F1(**kwargs)
+        self.val_acc = torchmetrics.Accuracy(**kwargs)
+        self.val_recall = torchmetrics.Recall(**kwargs)
+        self.val_precision = torchmetrics.Precision(**kwargs)
 
         self._datasets = None
 
@@ -194,12 +195,17 @@ class LitBaseModel(pl.LightningModule):
         loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
-        self.valid_acc(preds, labels)
-        self.valid_f1(preds, labels)
+        self.val_acc(preds, labels)
+        self.val_f1(preds, labels)
+        self.val_precision(preds, labels)
+        self.val_recall(preds, labels)
 
-        self.log('val_acc', self.valid_acc, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_f1', self.valid_f1, on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_acc', self.val_acc, **kwargs)
+        self.log('val_f1', self.val_f1, **kwargs)
+        self.log('val_precision', self.val_precision, **kwargs)
+        self.log('val_recall', self.val_recall, **kwargs)
+        self.log('val_loss', loss, **kwargs)
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop. It is independent of forward
@@ -280,9 +286,9 @@ class LitBaseModel(pl.LightningModule):
 
     def configure_callbacks(self):
         early_stop = EarlyStopping(
-            monitor="val_loss",
+            monitor="val_f1",
             min_delta=0.00,
-            mode="min",
+            mode="max",
             patience=3,
         )
         checkpoint = ModelCheckpoint(

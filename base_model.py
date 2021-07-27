@@ -92,15 +92,15 @@ class BaseClassifier(nn.Module):
         self.classifier.bias.data.zero_()
 
 
-    def forward(self, input_ids=None, token_type_ids=None, attention_mask=None):
+    def forward(self, input_ids=None, token_type_ids=None, attention_mask=None, output_hidden=False):
         output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-        x = output['last_hidden_state'].mean(axis=1)
-        x = self.activation(x)
-
+        hidden = output['last_hidden_state'].mean(axis=1)
+        x = self.activation(hidden)
         x = self.dropout(x)
+
         logits = self.classifier(x)
 
-        return logits
+        return {'logits': logits, 'hidden': hidden}
 
 
 class LitBaseModel(pl.LightningModule):
@@ -114,10 +114,42 @@ class LitBaseModel(pl.LightningModule):
         return model, args
 
     @staticmethod
+    def extract_feature(ckpt_path):
+        from common import prep, cv_split, get_dataset, with_cache
+        m, args = LitBaseModel.load_from_ckpt(ckpt_path)
+        m.eval().cuda().freeze()
+
+        df = with_cache(prep, m.cache_path)(args)
+        #tr_df, _ = cv_split(df, args.cv)
+        ds = get_dataset(df)
+        dl = DataLoader(ds, batch_size=128, shuffle=False)
+
+        hidden_states = []
+        with torch.no_grad():
+            for batch in tqdm(dl):
+                batch.pop('labels')
+                item = {k:v.to('cuda') for k, v in batch.items()}
+                out = m(item)
+                hidden_states.append(out['hidden'].cpu())
+
+        hs = torch.cat(hidden_states)
+        hs = list(map(lambda x: torch.squeeze(x).numpy(), torch.split(hs, 1)))
+        df['hs'] = hs
+
+        hs_df = df.groupby('index')['hs'].apply(list)
+        df.pop('hs')
+
+        df = df.groupby('index')[['index','label','cv']].first().set_index('index').merge(hs_df, left_index=True, right_index=True, how='inner')
+        df['seq_len'] = df.hs.apply(len)
+        df['hs'] = df['hs'].apply(torch.tensor)
+
+        return df
+
+    @staticmethod
     def eval_from_ckpt(ckpt_path):
         from common import prep, cv_split, get_dataset, with_cache
         m, args = LitBaseModel.load_from_ckpt(ckpt_path)
-        m.freeze().eval().cuda()
+        m.eval().cuda().freeze()
 
         df = with_cache(prep, m.cache_path)(args)
         _, va_df = cv_split(df, args.cv)
@@ -125,12 +157,11 @@ class LitBaseModel(pl.LightningModule):
         va_loader = DataLoader(va_ds, batch_size=32, shuffle=False)
 
         preds, labels = [], []
-        hidden_states = []
         with torch.no_grad():
             for x in tqdm(va_loader):
                 label = x.pop('labels')
                 item = {k:v.to('cuda') for k, v in x.items()}
-                logits = m(item)
+                logits = m(item)['logits']
                 preds.append(logits.cpu().argmax(axis=-1))
                 labels.append(label)
         preds = torch.cat(preds)
@@ -173,7 +204,7 @@ class LitBaseModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop. It is independent of forward
         labels = batch.pop("labels")
-        logits = self.model(**batch)
+        logits = self.model(**batch)['logits']
         loss = F.cross_entropy(logits, labels)
         return loss
 
@@ -202,10 +233,8 @@ class LitBaseModel(pl.LightningModule):
         return self._datasets
 
     def prepare_data(self):
-        from common import prep, use_cache
-
-
-        use_cache(prep, self.cache_path, self.hparams)
+        from common import prep, with_cache
+        with_cache(prep, self.cache_path, self.hparams)
 
     def load_datasets(self):
         from common import prep, cv_split, get_weights, get_dataset, use_cache
@@ -218,7 +247,6 @@ class LitBaseModel(pl.LightningModule):
 
         tr_df = get_weights(tr_df)
         weights = tr_df.pop('w').values.tolist()
-        self.sample_weights = weights
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
@@ -288,19 +316,13 @@ def train_base_model(args):
     )
     trainer.fit(model)
 
-def feature_extract(args) -> pd.DataFrame:
-    model = LitBaseModel.load_from_checkpoint(args.ckpt)
-    model.eval()
+if __name__ == '__main__':
+    parser = get_parser()
+    args = parser.parse_args()
+    args.num_labels = 46
+    args.dataroot = Path(args.dataroot)
 
-#if __name__ == '__main__':
-#    parser = get_parser()
-#    args = parser.parse_args()
-#    args.num_labels = 46
-#    args.dataroot = Path(args.dataroot)
-#
-#    pl.seed_everything(args.seed)
-#
-#    train_base_model(args)
+    pl.seed_everything(args.seed)
 
-ckpt = './res/base_model=xlm-roberta-large&max_seq_len=250/epoch=2-val_loss=1.055-val_f1=0.02.ckpt'
-LitBaseModel.eval_from_ckpt(ckpt)
+    train_base_model(args)
+

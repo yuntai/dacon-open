@@ -131,7 +131,7 @@ def prep_tok(df, tokenizer, add_special_tokens=False):
     }
     toks = tokenizer(df['data'].values.tolist(), **kwargs)
     for k in TOK_COLS:
-        if k in toks: #ROBERTA doen't have token_type_id
+        if k in toks:
             df[k] = toks[k]
 
     return df
@@ -148,10 +148,10 @@ def get_tokenizer(base_model, **kwargs):
 def with_cache(func, cache_path):
     def __inner(*args, **kwargs):
         if Path(cache_path).exists():
-            print(f"{cache_path} FOUND")
+            print(f"FOUND {cache_path}")
             df = pd.read_pickle(cache_path)
         else:
-            print(f"{cache_path} NOT FOUND")
+            print(f"NOT FOUND {cache_path}")
             df = func(*args, **kwargs)
             print(f"saving to {cache_path} ...")
             df.to_pickle(cache_path)

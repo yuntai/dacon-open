@@ -73,6 +73,7 @@ def get_parser():
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open')
     parser.add_argument('--name', type=str, default=None)
+    parser.add_argument('--save_dir', type=str, default="./.wandb")
 
     return parser
 
@@ -307,7 +308,8 @@ def train_base_model(args):
 
     wandb_logger = WandbLogger(
         project=args.project,
-        name=args.name
+        name=args.name,
+        save_dir=args.save_dir
     )
     trainer = pl.Trainer(
         gpus=args.gpus,

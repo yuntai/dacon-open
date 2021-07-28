@@ -73,7 +73,6 @@ def get_parser():
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open')
     parser.add_argument('--name', type=str, default=None)
-    parser.add_argument('--save_dir', type=str, default="./.wandb")
 
     return parser
 
@@ -173,9 +172,9 @@ class LitBaseModel(pl.LightningModule):
 
         self.save_hyperparameters(args)
 
-        num_labels = 46
+        num_classes = 46
         self.model = BaseClassifier(args)
-        kwargs = {'num_classes': self.num_classes, 'average':'macro'}
+        kwargs = {'num_classes': num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
         self.val_recall = torchmetrics.Recall(**kwargs)
@@ -192,7 +191,7 @@ class LitBaseModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         labels = batch.pop("labels")
-        logits = self.model(**batch)
+        logits = self.model(**batch)['logits']
         loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
@@ -201,15 +200,14 @@ class LitBaseModel(pl.LightningModule):
         self.val_precision(preds, labels)
         self.val_recall(preds, labels)
 
-        kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_acc', self.val_acc, **kwargs)
-        self.log('val_f1', self.val_f1, **kwargs)
-        self.log('val_precision', self.val_precision, **kwargs)
-        self.log('val_recall', self.val_recall, **kwargs)
-        self.log('val_loss', loss, **kwargs)
+        __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_acc', self.val_acc, **__kwargs)
+        self.log('val_f1', self.val_f1, **__kwargs)
+        self.log('val_precision', self.val_precision, **__kwargs)
+        self.log('val_recall', self.val_recall, **__kwargs)
+        self.log('val_loss', loss, **__kwargs)
 
     def training_step(self, batch, batch_idx):
-        # training_step defines the train loop. It is independent of forward
         labels = batch.pop("labels")
         logits = self.model(**batch)['logits']
         loss = F.cross_entropy(logits, labels)
@@ -241,12 +239,12 @@ class LitBaseModel(pl.LightningModule):
 
     def prepare_data(self):
         from common import prep, with_cache
-        with_cache(prep, self.cache_path, self.hparams)
+        with_cache(prep, self.cache_path)(self.hparams)
 
     def load_datasets(self):
-        from common import prep, cv_split, get_weights, get_dataset, use_cache
+        from common import prep, cv_split, get_weights, get_dataset, with_cache
 
-        df = use_cache(prep, self.cache_path, self.hparams)
+        df = with_cache(prep, self.cache_path)(self.hparams)
         num_classes = df.label.nunique()
         assert sorted(df.label.unique().tolist()) == list(range(num_classes))
 
@@ -294,10 +292,10 @@ class LitBaseModel(pl.LightningModule):
         )
         checkpoint = ModelCheckpoint(
             dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
-            monitor="val_loss",
+            monitor="val_f1",
             save_top_k=3,
             filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
-            mode='min'
+            mode='max'
         )
         lr_monitor = LearningRateMonitor(logging_interval='step')
 
@@ -308,8 +306,7 @@ def train_base_model(args):
 
     wandb_logger = WandbLogger(
         project=args.project,
-        name=args.name,
-        save_dir=args.save_dir
+        name=args.name
     )
     trainer = pl.Trainer(
         gpus=args.gpus,

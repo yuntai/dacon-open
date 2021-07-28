@@ -4,4 +4,4 @@ prep/
 logs/
 lightning_logs/
 .cache/
-.wandb/
+wandb/

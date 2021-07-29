@@ -44,8 +44,9 @@ def get_parser():
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
     #CKPT = './res/base_model=xlm-roberta-base&max_seq_len=250/epoch=3-step=18767-val_loss=0.337-val_f1=0.673.ckpt'
-    CKPT = "./res/bertbase_max_len=250/epoch=16-val_f1=0.74-val_loss=0.59.ckpt"
-    parser.add_argument('--ckpt', type=str, default=CKPT)
+    #CKPT = "./res/bertbase_max_len=250/epoch=16-val_f1=0.74-val_loss=0.59.ckpt"
+    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
+    parser.add_argument('--base_ckpt', type=str, default=CKPT)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
@@ -90,6 +91,40 @@ class LitOpenSeq(pl.LightningModule):
         parser.add_argument('--initializer_range', type=float, default=0.02)
         return parent_parser
 
+    @staticmethod
+    def load_from_ckpt(ckpt_path):
+        ckpt = torch.load(ckpt_path)
+        args = argparse.Namespace(**ckpt['hyper_parameters'])
+        model = LitOpenSeq(args)
+        state_dict = ckpt['state_dict']
+        model.load_state_dict(state_dict)
+        return model, args
+
+    @staticmethod
+    def submission():
+        base_ckpt = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
+        lstm_ckpt = "./res/lstm_seq/epoch=5-step=13072-val_loss=0.508-val_f1=0.752.ckpt"
+        test_cache_path = "prep/test_base.pkl"
+        cache_path = "prep/lstm_seq_test.pkl"
+
+        df = with_cache(LitBaseModel.extract_feature, cache_path)(base_ckpt, test_cache_path=test_cache_path)
+        ds = OpenSeqDataset(df)
+        dl = DataLoader(ds, batch_size=128, shuffle=False)
+
+        m, _ = LitOpenSeq.load_from_ckpt(lstm_ckpt)
+        m.eval().cuda().freeze()
+
+        preds = []
+        with torch.no_grad():
+            for batch in tqdm(dl):
+                pred = m(batch)
+                preds.append(pred)
+        preds = torch.cat(preds)
+        df['label'] = preds.cpu().numpy()
+        sub_df = df['label']
+        sub_df = sub_df.reset_index()
+        sub_df.to_csv('sub.csv', index=False)
+
     def __step(self, x, seq_len):
         packed_input = pack_padded_sequence(x, seq_len.cpu(), batch_first=True, enforce_sorted=False)
         _, (ht, _) = self.lstm(packed_input)
@@ -106,7 +141,7 @@ class LitOpenSeq(pl.LightningModule):
         self.save_hyperparameters(args)
         self._datasets = None
 
-        self.num_classes = 2
+        self.num_classes = 46
         kwargs = {'num_classes': self.num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
@@ -146,13 +181,13 @@ class LitOpenSeq(pl.LightningModule):
             module.weight.data.fill_(1.0)
 
     def prepare_data(self):
-        with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.ckpt)
+        with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
 
     def load_datasets(self):
-        df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.ckpt)
+        df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
         tr_df, va_df = cv_split(df, self.hparams.cv)
-        tr_df.loc[tr_df.label > 0, 'label'] = 1
-        va_df.loc[va_df.label > 0, 'label'] = 1
+        #tr_df.loc[tr_df.label > 0, 'label'] = 1
+        #va_df.loc[va_df.label > 0, 'label'] = 1
         tr_df = get_weights(tr_df)
         weights = tr_df.pop('w').values.tolist()
 
@@ -185,8 +220,10 @@ class LitOpenSeq(pl.LightningModule):
         return self._datasets
 
     def forward(self, batch):
-        x, seq_len, _ = batch
-        logits = self.__step(x)
+        x, seq_len = batch
+        x = x.cuda()
+        seq_len = seq_len.cuda()
+        logits = self.__step(x, seq_len)
         return logits.argmax(dim=1)
 
     def validation_step(self, batch, batch_idx):
@@ -276,11 +313,12 @@ def train_lstm_classifier(args):
     )
     trainer.fit(model)
 
-if __name__ == '__main__':
-    parser = get_parser()
-    parser = LitOpenSeq.add_model_specific_args(parser)
-    #parser = pl.Trainer.add_argparse_args(parser) 
-    args = parser.parse_args()
-    pl.seed_everything(args.seed)
-
-    train_lstm_classifier(args)
+#if __name__ == '__main__':
+#    parser = get_parser()
+#    parser = LitOpenSeq.add_model_specific_args(parser)
+#    #parser = pl.Trainer.add_argparse_args(parser) 
+#    args = parser.parse_args()
+#    pl.seed_everything(args.seed)
+#
+#    train_lstm_classifier(args)
+LitOpenSeq.submission()

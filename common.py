@@ -38,34 +38,16 @@ def get_split(text1, chunk_size=250, overlap_pct=0.25):
 
     return list(map(lambda x: " ".join(x), res))
 
-def cache_df(fntmpl):
-    def decorator(func):
-        def wrapper(args):
-            fn = fntmpl.format(vars(args))
-            print(f"{fn}" +  (' ' if Path(fn).exists() else ' NOT ') + "FOUND")
-            if Path(fn).exists():
-                print(f"reading from {fn} ...")
-                df = pd.read_pickle(fn)
-            else:
-                df = func(*args, **kwargs)
-                print(f"saving to {fn} ...")
-                df.to_pickle(fn)
-            return df
-        return wrapper
-    return decorator
-
 def clean_text(s):
     #s = re.sub("[^가-힣ㄱ-하-ㅣ]", " ", s)
-    s = re.sub('[^A-Za-z가-힣ㄱ-하-ㅣ]+', ' ', s)
+    #s = re.sub('[^A-Za-z가-힣ㄱ-하-ㅣ]+', ' ', s)
     s = re.sub("(\\W)+"," ", s)
     return s.strip()
-
 
 def get_weights(df, col='label'):
     w = df.groupby(col)[col].count()
     w = w.sum()/w
     w.name = 'w'
-    # ORDER CHANGES?
     return df.merge(w, how='left', left_on='label', right_index=True)
 
 def cv_split(df, cv):
@@ -74,7 +56,7 @@ def cv_split(df, cv):
 
     return tr_df, va_df
 
-def prep_txt(df, include_keywords=True, include_english=True):
+def prep_txt(df, include_keywords=True, include_english=True, is_test=False):
 
     cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
     if include_keywords:
@@ -82,7 +64,10 @@ def prep_txt(df, include_keywords=True, include_english=True):
         if include_english:
             cols += ['요약문_영문키워드']
 
-    df = df[cols + ['index','label']].copy()
+    if is_test:
+        df = df[cols + ['index']].copy()
+    else:
+        df = df[cols + ['index','label']].copy()
     df.fillna(' ', inplace=True)
 
     df['data'] = df[cols[0]]
@@ -105,7 +90,7 @@ def prep_cv(df, cv=0, cv_size=5, seed=42):
 
     return df
 
-def prep_explode(df, max_seq_len):
+def prep_explode(df, max_seq_len, is_test=False):
     __get_split = functools.partial(get_split, chunk_size=max_seq_len)
     df['data_split'] = df['data_cleaned'].apply(__get_split)
 
@@ -114,12 +99,17 @@ def prep_explode(df, max_seq_len):
     for _, row in df.iterrows():
       for ix, l in enumerate(row['data_split']):
           train_l.append(l)
-          label_l.append(row['label'])
-          cv_l.append(row['cv'])
+          if not is_test:
+            label_l.append(row['label'])
+            cv_l.append(row['cv'])
           index_l.append(row['index'])
           subix_l.append(ix)
 
-    return pd.DataFrame({'index': index_l, 'subix': subix_l, 'data':train_l, 'label':label_l, 'cv': cv_l})
+    data = {'index': index_l, 'subix': subix_l, 'data': train_l}
+    if not is_test:
+        data['label'] = label_l
+        data['cv'] = cv_l
+    return pd.DataFrame(data)
 
 # tokenize
 def prep_tok(df, tokenizer, add_special_tokens=False):
@@ -158,17 +148,21 @@ def with_cache(func, cache_path):
         return df
     return __inner
 
-def prep(args):
-    train_df = pd.read_csv(args.dataroot/'train.csv')
+def prep(args, is_test=False):
+    fn = 'test.csv' if is_test else 'train.csv'
+    df = pd.read_csv(args.dataroot/fn)
     tokenizer = get_tokenizer(args.base_model, cache_dir=args.cache_dir, do_lower_case=False)
 
-    df = prep_txt(train_df, args.use_keywords, args.use_english)
-    df = prep_cv(df, cv_size=args.cv_size, cv=args.cv, seed=args.seed)
-    df = prep_explode(df, args.max_seq_len)
+    df = prep_txt(df, args.use_keywords, args.use_english, is_test=is_test)
+    if not is_test:
+        df = prep_cv(df, cv_size=args.cv_size, cv=args.cv, seed=args.seed)
+    df = prep_explode(df, args.max_seq_len, is_test=is_test)
     df = prep_tok(df, tokenizer)
     return df
 
-def get_dataset(df):
+def get_dataset(df, is_test=False):
     X = df[TOK_COLS]
-    y = df['label'].values.tolist()
+    y = None
+    if not is_test:
+        y = df['label'].values.tolist()
     return OpenDataset(X, y)

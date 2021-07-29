@@ -1,6 +1,3 @@
-# some code snippets from and restructued ala 
-# https://github.com/BenevolentAI/MolBERT/blob/main/molbert/models/base.py
-
 import random
 import logging
 import argparse
@@ -35,6 +32,7 @@ import pytorch_lightning as pl
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
 import torch.distributed as dist
+import functools
 
 import common
 
@@ -76,6 +74,21 @@ def get_parser():
 
     return parser
 
+class MaskedLMTask(nn.Module):
+    def __init__(self, ):
+        super().__init__()
+        self.loss = CrossEntropyLoss(ignore_index=-1)
+        self.vocab_size = config.vocab_size
+        self.masked_lm_head = BertLMPredictionHead(config)
+
+    def forward(self, sequence_output, pooled_output):
+        return self.masked_lm_head(sequence_output)
+
+    def compute_loss(self, batch_labels, batch_predictions) -> torch.Tensor:
+        return self.loss(
+            batch_predictions['masked_lm'].view(-1, self.vocab_size), batch_labels['lm_label_ids'].view(-1)
+        )
+
 class BaseClassifier(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -85,7 +98,7 @@ class BaseClassifier(nn.Module):
 
         self.activation = nn.Tanh()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, args.num_labels)
+        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
@@ -113,19 +126,26 @@ class LitBaseModel(pl.LightningModule):
         return model, args
 
     @staticmethod
-    def extract_feature(ckpt_path):
+    def extract_feature(ckpt_path, test_cache_path=None):
         from common import prep, cv_split, get_dataset, with_cache
+        is_test = test_cache_path is not None
         m, args = LitBaseModel.load_from_ckpt(ckpt_path)
         m.eval().cuda().freeze()
 
-        df = with_cache(prep, m.cache_path)(args)
-        ds = get_dataset(df)
+        if test_cache_path is None:
+            df = with_cache(__prep, m.cache_path)(args)
+        else:
+            __prep = functools.partial(prep, is_test=True)
+            df = with_cache(__prep, test_cache_path)(args)
+
+        ds = get_dataset(df, is_test=is_test)
         dl = DataLoader(ds, batch_size=128, shuffle=False)
 
         hidden_states = []
         with torch.no_grad():
             for batch in tqdm(dl):
-                batch.pop('labels')
+                if not is_test:
+                    batch.pop('labels')
                 item = {k:v.to('cuda') for k, v in batch.items()}
                 out = m(item)
                 hidden_states.append(out['hidden'].cpu())
@@ -137,7 +157,10 @@ class LitBaseModel(pl.LightningModule):
         hs_df = df.groupby('index')['hs'].apply(list)
         df.pop('hs')
 
-        df = df.groupby('index')[['index','label','cv']].first().set_index('index').merge(hs_df, left_index=True, right_index=True, how='inner')
+        cols = ['index']
+        if not is_test:
+            cols += ['label', 'cv']
+        df = df.groupby('index')[cols].first().set_index('index').merge(hs_df, left_index=True, right_index=True, how='inner')
         df['seq_len'] = df.hs.apply(len)
         df['hs'] = df['hs'].apply(torch.tensor)
 
@@ -172,9 +195,10 @@ class LitBaseModel(pl.LightningModule):
 
         self.save_hyperparameters(args)
 
-        num_classes = 46
+        self.base_model = AutoModel.from_pretrained(args.base_model, cache_dir=args.cache_dir)
+
         self.model = BaseClassifier(args)
-        kwargs = {'num_classes': num_classes, 'average':'macro'}
+        kwargs = {'num_classes': args.num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
         self.val_recall = torchmetrics.Recall(**kwargs)
@@ -187,6 +211,11 @@ class LitBaseModel(pl.LightningModule):
         self.cache_path = cache_path.replace('args.','')
 
     def forward(self, batch):
+        input_ids = batch['input_ids']
+        token_type_ids = batch.get('token_type_ids', None)
+        attention_mask = batchp['attention_mask']
+
+        output = self.base_model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
         return self.model(**batch)
 
     def validation_step(self, batch, batch_idx):
@@ -245,8 +274,8 @@ class LitBaseModel(pl.LightningModule):
         from common import prep, cv_split, get_weights, get_dataset, with_cache
 
         df = with_cache(prep, self.cache_path)(self.hparams)
-        num_classes = df.label.nunique()
-        assert sorted(df.label.unique().tolist()) == list(range(num_classes))
+        #TODO: custom mapping for hiearchical classification?
+        df.loc[df.label > 0, 'label'] = 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
@@ -324,7 +353,7 @@ def train_base_model(args):
 if __name__ == '__main__':
     parser = get_parser()
     args = parser.parse_args()
-    args.num_labels = 46
+    args.num_classes = 2
     args.dataroot = Path(args.dataroot)
 
     pl.seed_everything(args.seed)

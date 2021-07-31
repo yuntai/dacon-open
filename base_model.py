@@ -54,7 +54,7 @@ def get_parser():
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'xlm-roberta-large', 'monologg/kobert', 'monologg/distilkobert']
+    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
     parser.add_argument('--base_model', choices=MODELS, default='bert-base-multilingual-cased')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
@@ -133,7 +133,7 @@ class LitBaseModel(pl.LightningModule):
         m.eval().cuda().freeze()
 
         if test_cache_path is None:
-            df = with_cache(__prep, m.cache_path)(args)
+            df = with_cache(prep, m.cache_path)(args)
         else:
             __prep = functools.partial(prep, is_test=True)
             df = with_cache(__prep, test_cache_path)(args)
@@ -213,7 +213,7 @@ class LitBaseModel(pl.LightningModule):
     def forward(self, batch):
         input_ids = batch['input_ids']
         token_type_ids = batch.get('token_type_ids', None)
-        attention_mask = batchp['attention_mask']
+        attention_mask = batch['attention_mask']
 
         output = self.base_model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
         return self.model(**batch)

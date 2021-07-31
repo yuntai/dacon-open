@@ -21,7 +21,6 @@ from sklearn.metrics import classification_report
 
 from pytorch_lightning.loggers import WandbLogger
 
-#from transformers import BertForSequenceClassification
 from transformers import EarlyStoppingCallback
 from torch.utils.data.sampler import WeightedRandomSampler
 from torch.nn import CrossEntropyLoss
@@ -115,7 +114,7 @@ class BaseClassifier(nn.Module):
         return {'logits': logits, 'hidden': hidden}
 
 
-class LitBaseModel(pl.LightningModule):
+class LitBaseMLMModel(pl.LightningModule):
     @staticmethod
     def load_from_ckpt(ckpt_path):
         ckpt = torch.load(ckpt_path)

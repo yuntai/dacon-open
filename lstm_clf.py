@@ -1,7 +1,7 @@
 import random
 import argparse
 import re
-from pathlib import Path
+import os
 
 import torch
 import torch.nn as nn
@@ -45,7 +45,7 @@ def get_parser():
     parser.add_argument('--seed', type=int, default=42)
     #CKPT = './res/base_model=xlm-roberta-base&max_seq_len=250/epoch=3-step=18767-val_loss=0.337-val_f1=0.673.ckpt'
     #CKPT = "./res/bertbase_max_len=250/epoch=16-val_f1=0.74-val_loss=0.59.ckpt"
-    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
+    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.318-val_f1=0.874.ckpt"
     parser.add_argument('--base_ckpt', type=str, default=CKPT)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
@@ -141,13 +141,14 @@ class LitOpenSeq(pl.LightningModule):
         self.save_hyperparameters(args)
         self._datasets = None
 
-        self.num_classes = 46
+        self.num_classes = 2
         kwargs = {'num_classes': self.num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
         self.val_recall = torchmetrics.Recall(**kwargs)
         self.val_precision = torchmetrics.Precision(**kwargs)
-        self.cache_path = "./prep/seq.pkl"
+        bn = os.path.splitext(os.path.basename(args.base_ckpt))[0]
+        self.cache_path = os.path.join("./prep", f"seq_{bn}.pkl")
 
         self.lstm = nn.LSTM(
             input_size=args.input_size, # dim
@@ -186,8 +187,8 @@ class LitOpenSeq(pl.LightningModule):
     def load_datasets(self):
         df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
         tr_df, va_df = cv_split(df, self.hparams.cv)
-        #tr_df.loc[tr_df.label > 0, 'label'] = 1
-        #va_df.loc[va_df.label > 0, 'label'] = 1
+        tr_df.loc[tr_df.label > 0, 'label'] = 1
+        va_df.loc[va_df.label > 0, 'label'] = 1
         tr_df = get_weights(tr_df)
         weights = tr_df.pop('w').values.tolist()
 
@@ -313,12 +314,12 @@ def train_lstm_classifier(args):
     )
     trainer.fit(model)
 
-#if __name__ == '__main__':
-#    parser = get_parser()
-#    parser = LitOpenSeq.add_model_specific_args(parser)
-#    #parser = pl.Trainer.add_argparse_args(parser) 
-#    args = parser.parse_args()
-#    pl.seed_everything(args.seed)
-#
-#    train_lstm_classifier(args)
-LitOpenSeq.submission()
+if __name__ == '__main__':
+    parser = get_parser()
+    parser = LitOpenSeq.add_model_specific_args(parser)
+    #parser = pl.Trainer.add_argparse_args(parser) 
+    args = parser.parse_args()
+    pl.seed_everything(args.seed)
+
+    train_lstm_classifier(args)
+#LitOpenSeq.submission()

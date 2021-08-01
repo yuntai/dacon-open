@@ -79,7 +79,7 @@ def prep_txt(df, include_keywords=True, include_english=True, is_test=False):
     return df
 
 # split train data to 5 set
-def prep_cv(df, cv=0, cv_size=5, seed=42):
+def prep_cv(df, cv_size=5, seed=42):
     indices = list(df.index)
     random.Random(seed).shuffle(indices)
     sz = df.shape[0]//cv_size
@@ -155,7 +155,7 @@ def prep(args, is_test=False):
 
     df = prep_txt(df, args.use_keywords, args.use_english, is_test=is_test)
     if not is_test:
-        df = prep_cv(df, cv_size=args.cv_size, cv=args.cv, seed=args.seed)
+        df = prep_cv(df, cv_size=args.cv_size, seed=args.seed)
     df = prep_explode(df, args.max_seq_len, is_test=is_test)
     df = prep_tok(df, tokenizer)
     return df

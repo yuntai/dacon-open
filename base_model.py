@@ -31,7 +31,6 @@ from tqdm.auto import tqdm
 import pytorch_lightning as pl
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
-import torch.distributed as dist
 import functools
 
 import common

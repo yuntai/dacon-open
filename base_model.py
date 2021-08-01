@@ -73,21 +73,6 @@ def get_parser():
 
     return parser
 
-class MaskedLMTask(nn.Module):
-    def __init__(self, ):
-        super().__init__()
-        self.loss = CrossEntropyLoss(ignore_index=-1)
-        self.vocab_size = config.vocab_size
-        self.masked_lm_head = BertLMPredictionHead(config)
-
-    def forward(self, sequence_output, pooled_output):
-        return self.masked_lm_head(sequence_output)
-
-    def compute_loss(self, batch_labels, batch_predictions) -> torch.Tensor:
-        return self.loss(
-            batch_predictions['masked_lm'].view(-1, self.vocab_size), batch_labels['lm_label_ids'].view(-1)
-        )
-
 class BaseClassifier(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -102,8 +87,7 @@ class BaseClassifier(nn.Module):
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
 
-
-    def forward(self, input_ids=None, token_type_ids=None, attention_mask=None, output_hidden=False):
+    def forward(self, input_ids=None, token_type_ids=None, attention_mask=None):
         output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
         hidden = output['last_hidden_state'].mean(axis=1)
         x = self.activation(hidden)
@@ -113,14 +97,15 @@ class BaseClassifier(nn.Module):
 
         return {'logits': logits, 'hidden': hidden}
 
-
 class LitBaseModel(pl.LightningModule):
     @staticmethod
     def load_from_ckpt(ckpt_path):
         ckpt = torch.load(ckpt_path)
         args = argparse.Namespace(**ckpt['hyper_parameters'])
+        args.num_classes = 46
         model = LitBaseModel(args)
         state_dict = ckpt['state_dict']
+        state_dict = {k.replace("model.", "base_model."):v for k,v in state_dict.items()}
         model.load_state_dict(state_dict)
         return model, args
 
@@ -194,7 +179,7 @@ class LitBaseModel(pl.LightningModule):
 
         self.save_hyperparameters(args)
 
-        self.model = BaseClassifier(args)
+        self.base_model = BaseClassifier(args)
 
         __kwargs = {'num_classes': args.num_classes, 'average':'macro'}
 
@@ -210,12 +195,12 @@ class LitBaseModel(pl.LightningModule):
         self.cache_path = cache_path.replace('args.','')
 
     def forward(self, batch):
+        if 'labels' in batch:
+            _ = batch.pop("labels")
         input_ids = batch['input_ids']
-        token_type_ids = batch.get('token_type_ids', None)
+m       token_type_ids = batch.get('token_type_ids', None)
         attention_mask = batch['attention_mask']
-
-        output = self.base_model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-        return self.model(**batch)
+        return self.base_model(**batch)
 
     def validation_step(self, batch, batch_idx):
         labels = batch.pop("labels")

@@ -63,9 +63,7 @@ class LitMLModel(pl.LightningModule):
         hs_df = df.groupby('index')['hs'].apply(list)
         df.pop('hs')
 
-        cols = ['index']
-        if not is_test:
-            cols += ['label', 'cv']
+        cols = ['index', 'label', 'cv']
         df = df.groupby('index')[cols].first().set_index('index').merge(hs_df, left_index=True, right_index=True, how='inner')
         df['seq_len'] = df.hs.apply(len)
         df['hs'] = df['hs'].apply(torch.tensor)

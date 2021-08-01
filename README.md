@@ -1,10 +1,10 @@
 - unbalnaced label
-- hiearchical label
-- F1 macro optimization
+- hiearchical label (?)
+- F1 macro optimization (nothing much as post processing)
 - contrasive using detaled label? (?)
-- longer text 
+- longer text (transformer model)
 - https://arxiv.org/abs/1910.10781
-- initialization - difference in LB score (O) used truncated normal
+- initialization - difference in LB score (ok) used truncated normal
 - https://medium.com/@armandj.olivares/using-bert-for-classifying-documents-with-long-texts-5c3e7b04573d
 - filter label 0 first? (two-level hiearchy)
 - check Seq model initialization
@@ -81,3 +81,5 @@ https://stackoverflow.com/questions/63030692/how-do-i-use-bertformaskedlm-or-ber
 
 # NLP augmentation
 https://neptune.ai/blog/data-augmentation-nlp
+
+# MLM with bert doens't seem to work increase score

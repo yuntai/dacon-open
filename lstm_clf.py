@@ -43,16 +43,13 @@ def get_parser():
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    #CKPT = './res/base_model=xlm-roberta-base&max_seq_len=250/epoch=3-step=18767-val_loss=0.337-val_f1=0.673.ckpt'
-    #CKPT = "./res/bertbase_max_len=250/epoch=16-val_f1=0.74-val_loss=0.59.ckpt"
-    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.318-val_f1=0.874.ckpt"
+    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
     parser.add_argument('--base_ckpt', type=str, default=CKPT)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
     MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'xlm-roberta-large', 'monologg/kobert', 'monologg/distilkobert']
-    #parser.add_argument('--base_model', choices=MODELS, default='bert-base-multilingual-cased')
     parser.add_argument('--cache_dir', type=str, default="./.cache", help="huggingface cahce dir")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
     # wandb related
@@ -141,14 +138,14 @@ class LitOpenSeq(pl.LightningModule):
         self.save_hyperparameters(args)
         self._datasets = None
 
-        self.num_classes = 2
+        self.num_classes = 46
         kwargs = {'num_classes': self.num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
         self.val_recall = torchmetrics.Recall(**kwargs)
         self.val_precision = torchmetrics.Precision(**kwargs)
         bn = os.path.splitext(os.path.basename(args.base_ckpt))[0]
-        self.cache_path = os.path.join("./prep", f"seq_{bn}.pkl")
+        self.cache_path = os.path.join("./feat", f"feat_{bn}.pkl")
 
         self.lstm = nn.LSTM(
             input_size=args.input_size, # dim
@@ -168,8 +165,6 @@ class LitOpenSeq(pl.LightningModule):
     def _init_weights(self, module):
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
-            # Slightly different from the TF version which uses truncated_normal for initialization
-            # cf https://github.com/pytorch/pytorch/pull/5617
             module.weight.data.normal_(mean=0.0, std=self.hparams.initializer_range)
             if module.bias is not None:
                 module.bias.data.zero_()
@@ -187,8 +182,7 @@ class LitOpenSeq(pl.LightningModule):
     def load_datasets(self):
         df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
         tr_df, va_df = cv_split(df, self.hparams.cv)
-        tr_df.loc[tr_df.label > 0, 'label'] = 1
-        va_df.loc[va_df.label > 0, 'label'] = 1
+
         tr_df = get_weights(tr_df)
         weights = tr_df.pop('w').values.tolist()
 
@@ -317,7 +311,6 @@ def train_lstm_classifier(args):
 if __name__ == '__main__':
     parser = get_parser()
     parser = LitOpenSeq.add_model_specific_args(parser)
-    #parser = pl.Trainer.add_argparse_args(parser) 
     args = parser.parse_args()
     pl.seed_everything(args.seed)
 

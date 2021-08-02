@@ -79,7 +79,8 @@ class LitMLModel(pl.LightningModule):
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
-        self.loss_fct = F1_Loss()
+
+        self.loss_fct = F1_Loss(args.num_classes)
 
         self.val_f1 = torchmetrics.F1(num_classes=args.num_classes, average='macro')
 

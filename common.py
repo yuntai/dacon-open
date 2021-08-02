@@ -106,7 +106,9 @@ def get_weights(df, col='label'):
     w = df.groupby(col)[col].count()
     w = w.sum()/w
     w.name = 'w'
-    return df.merge(w, how='left', left_on='label', right_index=True)
+    df = df.merge(w, how='left', left_on='label', right_index=True)
+    weights = df.pop('w').values.tolist()
+    return df, weights
 
 def cv_split(df, cv):
     tr_df = df.loc[df.cv!=cv]

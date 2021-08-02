@@ -1,153 +1,54 @@
-import random
-import logging
-import argparse
-import re
-import argparse
-from pathlib import Path
 import os
+import argparse
+import random
+import numpy as np
+from typing import Optional
+
+from numpy.random import default_rng
+import pandas as pd
 
 import torch
 import torch.nn as nn
-
-import pandas as pd
-import numpy as np
-
-import torchmetrics
-from torch.utils.data import DataLoader, Dataset
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from sklearn.metrics import classification_report
-
-
-from pytorch_lightning.loggers import WandbLogger
-
-from transformers import EarlyStoppingCallback
-from torch.utils.data.sampler import WeightedRandomSampler
-from torch.nn import CrossEntropyLoss
-from transformers import get_scheduler, AutoModel
-from transformers import AdamW
-from tqdm.auto import tqdm
-import pytorch_lightning as pl
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
-import torch.distributed as dist
-import functools
+from torch.optim.lr_scheduler import LambdaLR
+from torch.utils.data import Dataset, DataLoader
+import torchmetrics
 
-import common
+import pytorch_lightning as pl
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from transformers import BertForMaskedLM, AutoTokenizer, AdamW
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
+from common import F1_Loss
 
-def get_parser():
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--max_seq_len', type=int, default=250)
-    parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=20)
-    parser.add_argument('--gpus', type=int, default=2)
-    parser.add_argument('--cv', type=int, default=0)
-    parser.add_argument('--seed', type=int, default=42)
-
-    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
-    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'xlm-roberta-large', 'monologg/kobert', 'monologg/distilkobert']
-    parser.add_argument('--base_model', choices=MODELS, default='bert-base-multilingual-cased')
-    parser.add_argument('--cache_dir', type=str, default="./.cache")
-    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
-
-    parser.add_argument('--use_keywords', dest='use_keywords', action='store_true')
-    parser.add_argument('--no_use_keywords', dest='use_keywords', action='store_false')
-    parser.set_defaults(use_keywords=True)
-    parser.add_argument('--use_english', dest='use_english', action='store_true')
-    parser.add_argument('--no_use_english', dest='use_english', action='store_false')
-    parser.set_defaults(use_english=True)
-
-    parser.add_argument('--cv_size', type=int, default=5)
-
-    # wandb related
-    parser.add_argument('--project', type=str, default='dacon-open')
-    parser.add_argument('--name', type=str, default=None)
-
-    return parser
-
-class MaskedLMTask(nn.Module):
-    def __init__(self, ):
-        super().__init__()
-        self.loss = CrossEntropyLoss(ignore_index=-1)
-        self.vocab_size = config.vocab_size
-        self.masked_lm_head = BertLMPredictionHead(config)
-
-    def forward(self, sequence_output, pooled_output):
-        return self.masked_lm_head(sequence_output)
-
-    def compute_loss(self, batch_labels, batch_predictions) -> torch.Tensor:
-        return self.loss(
-            batch_predictions['masked_lm'].view(-1, self.vocab_size), batch_labels['lm_label_ids'].view(-1)
-        )
-
-class BaseClassifier(nn.Module):
-    def __init__(self, args):
-        super().__init__()
-        print("args=", args)
-        self.m = AutoModel.from_pretrained(args.base_model, cache_dir=args.cache_dir)
-        config = self.m.config
-
-        self.activation = nn.Tanh()
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
-
-        self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
-        self.classifier.bias.data.zero_()
-
-
-    def forward(self, input_ids=None, token_type_ids=None, attention_mask=None, output_hidden=False):
-        output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-        hidden = output['last_hidden_state'].mean(axis=1)
-        x = self.activation(hidden)
-        x = self.dropout(x)
-
-        logits = self.classifier(x)
-
-        return {'logits': logits, 'hidden': hidden}
-
-
-class LitBaseMLMModel(pl.LightningModule):
+class LitMLModel(pl.LightningModule):
     @staticmethod
-    def load_from_ckpt(ckpt_path):
-        ckpt = torch.load(ckpt_path)
-        args = argparse.Namespace(**ckpt['hyper_parameters'])
-        model = LitBaseModel(args)
-        state_dict = ckpt['state_dict']
-        model.load_state_dict(state_dict)
-        return model, args
+    def extract_feature(ckpt_path):
+        from common import prep, with_cache, get_dataset
+        from tqdm.auto import tqdm
+        import pathlib
+        model = LitMLModel.load_from_checkpoint(ckpt_path)
+        model.eval().cuda().freeze()
+        args = model.hparams
+        args.use_keywords = True
+        args.use_english = True
+        args.dataroot = pathlib.Path("/mnt/datasets/open")
+        args.max_seq_len = 250
 
-    @staticmethod
-    def extract_feature(ckpt_path, test_cache_path=None):
-        from common import prep, cv_split, get_dataset, with_cache
-        is_test = test_cache_path is not None
-        m, args = LitBaseModel.load_from_ckpt(ckpt_path)
-        m.eval().cuda().freeze()
+        df = with_cache(prep, './prep/mlm_feat.pkl')(args)
 
-        if test_cache_path is None:
-            df = with_cache(__prep, m.cache_path)(args)
-        else:
-            __prep = functools.partial(prep, is_test=True)
-            df = with_cache(__prep, test_cache_path)(args)
-
-        ds = get_dataset(df, is_test=is_test)
-        dl = DataLoader(ds, batch_size=128, shuffle=False)
+        ds = get_dataset(df)
+        dl = DataLoader(ds, batch_size=32, shuffle=False)
 
         hidden_states = []
         with torch.no_grad():
             for batch in tqdm(dl):
-                if not is_test:
-                    batch.pop('labels')
+                batch.pop('label')
                 item = {k:v.to('cuda') for k, v in batch.items()}
-                out = m(item)
-                hidden_states.append(out['hidden'].cpu())
+                item['output_hidden_states'] = True
+                out = model(item)
+                hidden_states.append(out['hidden_states'][-1].mean(axis=1).cpu())
 
         hs = torch.cat(hidden_states)
         hs = list(map(lambda x: torch.squeeze(x).numpy(), torch.split(hs, 1)))
@@ -156,135 +57,84 @@ class LitBaseMLMModel(pl.LightningModule):
         hs_df = df.groupby('index')['hs'].apply(list)
         df.pop('hs')
 
-        cols = ['index']
-        if not is_test:
-            cols += ['label', 'cv']
+        cols = ['index', 'label', 'cv']
         df = df.groupby('index')[cols].first().set_index('index').merge(hs_df, left_index=True, right_index=True, how='inner')
         df['seq_len'] = df.hs.apply(len)
         df['hs'] = df['hs'].apply(torch.tensor)
 
         return df
 
-    @staticmethod
-    def eval_from_ckpt(ckpt_path):
-        from common import prep, cv_split, get_dataset, with_cache
-        m, args = LitBaseModel.load_from_ckpt(ckpt_path)
-        m.eval().cuda().freeze()
-
-        df = with_cache(prep, m.cache_path)(args)
-        _, va_df = cv_split(df, args.cv)
-        va_ds = get_dataset(va_df)
-        va_loader = DataLoader(va_ds, batch_size=32, shuffle=False)
-
-        preds, labels = [], []
-        with torch.no_grad():
-            for x in tqdm(va_loader):
-                label = x.pop('labels')
-                item = {k:v.to('cuda') for k, v in x.items()}
-                logits = m(item)['logits']
-                preds.append(logits.cpu().argmax(axis=-1))
-                labels.append(label)
-        preds = torch.cat(preds)
-        labels = torch.cat(labels)
-        print(classification_report(labels, preds))
-        return (preds, labels)
-
     def __init__(self, args):
         super().__init__()
-
         self.save_hyperparameters(args)
+        self.model = BertForMaskedLM.from_pretrained(args.base_model, cache_dir=args.cache_dir)
 
-        self.model = BaseClassifier(args)
+        config = self.model.config
+        self.activation = torch.nn.ReLU()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
 
-        __kwargs = {'num_classes': args.num_classes, 'average':'macro'}
+        self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
+        self.classifier.bias.data.zero_()
+        self.loss_fct = F1_Loss()
 
-        self.val_f1 = torchmetrics.F1(**__kwargs)
-        self.val_acc = torchmetrics.Accuracy(**__kwargs)
-        self.val_recall = torchmetrics.Recall(**__kwargs)
-        self.val_precision = torchmetrics.Precision(**__kwargs)
-
-        self._datasets = None
-
-        base_model = args.base_model.replace('/', '-')
-        cache_path = f'./prep/{args.seed=}&{args.max_seq_len=}&{base_model=}&{args.use_keywords=}&{args.use_english=}.pkl'
-        self.cache_path = cache_path.replace('args.','')
+        self.val_f1 = torchmetrics.F1(num_classes=args.num_classes, average='macro')
 
     def forward(self, batch):
-        input_ids = batch['input_ids']
-        token_type_ids = batch.get('token_type_ids', None)
-        attention_mask = batchp['attention_mask']
+        return self.__step(batch)
 
-        output = self.base_model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-        return self.model(**batch)
-
-    def validation_step(self, batch, batch_idx):
-        labels = batch.pop("labels")
-        logits = self.model(**batch)['logits']
-        loss = F.cross_entropy(logits, labels)
-        preds = logits.argmax(dim=1)
-
-        self.val_acc(preds, labels)
-        self.val_f1(preds, labels)
-        self.val_precision(preds, labels)
-        self.val_recall(preds, labels)
-
-        __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
-        self.log('val_acc', self.val_acc, **__kwargs)
-        self.log('val_f1', self.val_f1, **__kwargs)
-        self.log('val_precision', self.val_precision, **__kwargs)
-        self.log('val_recall', self.val_recall, **__kwargs)
-        self.log('val_loss', loss, **__kwargs)
+    def __step(self, batch):
+        cls_labels = batch.pop('cls_labels')
+        out = self.model(**batch, output_hidden_states=True)
+        lm_loss = out['loss']
+        last_hidden_state = out['hidden_states'][-1]
+        pooled_hidden_state = last_hidden_state.mean(dim=1)
+        x = self.activation(pooled_hidden_state)
+        x = self.dropout(x)
+        logits = self.classifier(x)
+        #cls_loss = F.cross_entropy(logits, cls_labels)
+        cls_loss = self.loss_fct(logits, cls_labels)
+        return {
+            'lm_loss': lm_loss,
+            'cls_loss': cls_loss,
+            'last_hidden_state': last_hidden_state,
+            'logits': logits,
+            'cls_labels': cls_labels
+        }
 
     def training_step(self, batch, batch_idx):
-        labels = batch.pop("labels")
-        logits = self.model(**batch)['logits']
-        loss = F.cross_entropy(logits, labels)
+        out = self.__step(batch)
+        loss = out['lm_loss'] + out['cls_loss']
         return loss
 
-    def train_dataloader(self) -> DataLoader:
-        from sampler import DistributedSampler
+    def validation_step(self, batch, batch_idx):
+        out = self.__step(batch)
+        loss = out['lm_loss'] + out['cls_loss']
 
-        w = self.get_datasets()['weights']
-        weighted_sampler = WeightedRandomSampler(w, len(w))
+        cls_labels = out['cls_labels']
+        #preds = logits.argmax(dim=1)
+        self.val_f1(out['logits'], cls_labels)
+        __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_f1', self.val_f1, **__kwargs)
+        self.log('val_loss', loss, **__kwargs)
 
-        return DataLoader(
-            self.get_datasets()['train'],
-            batch_size=self.hparams.batch_size,
-            shuffle=False,
-            sampler=DistributedSampler(weighted_sampler),
-            pin_memory=True,
-            num_workers=16)
+    def configure_callbacks(self):
+        early_stop = EarlyStopping(
+            monitor="val_loss",
+            min_delta=0.00,
+            mode="min",
+            patience=3,
+        )
+        checkpoint = ModelCheckpoint(
+            dirpath=f"./res/mlm_base={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
+            monitor="val_loss",
+            save_top_k=3,
+            filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
+            mode='min'
+        )
+        lr_monitor = LearningRateMonitor(logging_interval='step')
 
-    def val_dataloader(self) -> DataLoader:
-        return DataLoader(self.get_datasets()['val'], batch_size=self.hparams.batch_size, num_workers=16)
-
-    # @property raises torch.nn.modules.module.ModuleAttributeError
-    def get_datasets(self):
-        if self._datasets is None:
-            self._datasets = self.load_datasets()
-
-        return self._datasets
-
-    def prepare_data(self):
-        from common import prep, with_cache
-        with_cache(prep, self.cache_path)(self.hparams)
-
-    def load_datasets(self):
-        from common import prep, cv_split, get_weights, get_dataset, with_cache
-
-        df = with_cache(prep, self.cache_path)(self.hparams)
-        #TODO: custom mapping for hiearchical classification?
-        df.loc[df.label > 0, 'label'] = 1
-
-        tr_df, va_df = cv_split(df, self.hparams.cv)
-
-        tr_df = get_weights(tr_df)
-        weights = tr_df.pop('w').values.tolist()
-
-        tr_ds = get_dataset(tr_df)
-        va_ds = get_dataset(va_df)
-
-        return {'train': tr_ds, 'val': va_ds, 'weights': weights}
+        return [early_stop, checkpoint, lr_monitor]
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -298,7 +148,8 @@ class LitBaseMLMModel(pl.LightningModule):
         }]
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
 
-        num_batches = len(self.get_datasets()['train']) // self.hparams.batch_size
+        ___sz = 174304
+        num_batches = ___sz // self.hparams.batch_size
         num_training_steps = num_batches * self.hparams.max_epochs
         num_warmup_steps = 0
 
@@ -311,51 +162,170 @@ class LitBaseMLMModel(pl.LightningModule):
         lr_scheduler = LambdaLR(optimizer, lr_lambda, -1)
         return [optimizer], [{"scheduler": lr_scheduler, "interval": "step"}]
 
-    def configure_callbacks(self):
-        early_stop = EarlyStopping(
-            monitor="val_f1",
-            min_delta=0.00,
-            mode="max",
-            patience=3,
-        )
-        checkpoint = ModelCheckpoint(
-            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
-            monitor="val_f1",
-            save_top_k=3,
-            filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
-            mode='max'
-        )
-        lr_monitor = LearningRateMonitor(logging_interval='step')
 
-        return [early_stop, checkpoint, lr_monitor]
+class OpenDataModule(pl.LightningDataModule):
 
-def train_base_model(args):
-    model = LitBaseModel(args)
+    def __init__(self, args):
+        super().__init__()
+        self.batch_size = args.batch_size
+        self.args = args
+        self.prep_cache_path = f'./prep/{self.args.base_model}_mlm_prep.pkl'
 
-    wandb_logger = WandbLogger(
-        project=args.project,
-        name=args.name
-    )
+    def prepare_data(self):
+        from common import with_cache
+        tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
+        with_cache(prep_txt, self.prep_cache_path)(tokenizer)
+
+    def setup(self, stage: Optional[str] = None):
+        from common import with_cache, get_weights
+        tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
+        self.df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
+        tr_df = self.df[self.df.cv != 0]
+
+        tr_df, weights = get_weights(tr_df)
+        self.weights = weights
+
+        self.va_df = self.df[self.df.cv == 0]
+
+        self.tr_ds = OpenMLMDataset(tr_df, tokenizer)
+        self.va_ds = OpenMLMDataset(va_df, tokenizer)
+
+    def train_dataloader(self):
+        from sampler import DistributedSampler
+        weighted_sampler = WeightedRandomSampler(self.weights, len(self.weights))
+        return DataLoader(
+            self.tr_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            sampler=DistributedSampler(weighted_sampler),
+            pin_memory=True,
+            num_workers=16)
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.va_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            pin_memory=True
+            num_workers=16)
+
+    #def test_dataloader(self):
+    #    return DataLoader(self.ds, batch_size=self.hparams.batch_size)
+
+class OpenMLMDataset(torch.utils.data.Dataset):
+    def __init__(self, df, tokenizer, max_seq_len=512, add_speical_tok=False, seed=42):
+        super().__init__()
+        self.df = df.copy()
+        self.max_seq_len = max_seq_len
+        self.add_speical_tok = add_speical_tok
+        self.tokenizer = tokenizer
+        self.seed = seed
+        self.mask_id = tokenizer.all_special_ids[tokenizer.all_special_tokens.index(tokenizer.special_tokens_map['mask_token'])]
+        self.rng = default_rng(seed)
+
+    def random_words(self, toks):
+        probs = self.rng.random(len(toks))
+        lm_label = toks.copy()
+        ix = probs < 0.15
+        toks[ix] = self.mask_id
+        lm_label[~ix] = -100
+        return toks, lm_label
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+
+        self.rng.shuffle(row.ixs)
+
+        toks = row.toks[row.ixs]
+        tok_lens = row.tok_lens[row.ixs]
+        toks = np.concatenate(toks).astype(int)
+        label = row.label
+
+        if toks.size > self.max_seq_len:
+            ovf = self.max_seq_len - toks.size
+            if self.rng.random(1).item() < 0.5:
+                toks = toks[:ovf]
+            else:
+                toks = toks[-ovf:]
+
+        toks, lm_label = self.random_words(toks)
+        toks = torch.tensor(toks)
+        lm_label = torch.tensor(lm_label)
+
+        sz = toks.size(0)
+        attention_mask = torch.zeros(self.max_seq_len)
+        attention_mask[:sz] = 1
+
+        pad_sz = self.max_seq_len-sz
+        toks = F.pad(toks, (0, pad_sz))
+        lm_label = F.pad(lm_label, (0, pad_sz), value=-100)
+
+        return {
+            'input_ids': toks,
+            'attention_mask': attention_mask,
+            'cls_labels': label,
+            'labels': lm_label
+        }
+
+    def __len__(self):
+        return self.df.shape[0]
+
+def prep_txt(tokenizer):
+    from tqdm.auto import tqdm
+    from common import prep_cv
+
+    df = pd.read_csv("/mnt/datasets/open/train.csv")
+    df = prep_cv(df)
+
+    kwargs = {
+        'add_special_tokens': False,
+        'padding': False,
+        'return_attention_mask': False,
+        'truncation': False,
+        'return_token_type_ids': False,
+        'return_tensors': None,
+    }
+
+    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
+    df[cols] = df[cols].fillna('')
+
+    toks_lst = []
+    len_lst = []
+    for t in tqdm(df[cols].itertuples()):
+        t = t[1:]
+        sents = sum([t[i].split('\n') for i in range(len(cols))], [])
+        sents = [s.strip() for s in sents if len(s.strip()) > 0]
+        toks = tokenizer(sents, **kwargs)['input_ids']
+        toks_lst.append(np.array(toks,dtype=object))
+        len_lst.append(np.array(list(map(len, toks))))
+
+    df['toks'] = toks_lst
+    df['tok_lens'] = len_lst
+    df['tot_len'] = df['tok_lens'].apply(sum)
+    df['ixs'] = df['toks'].apply(lambda x: np.arange(len(x)))
+
+    cols = ['index', 'toks', 'tok_lens', 'tot_len', 'ixs', 'cv']
+    if 'label' in df.columns:
+        cols += ['label']
+
+    df = df[cols]
+
+    return df
+
+def fit():
+    from common import get_default_parser
+    parser = get_default_parser()
+    args = parser.parse_args()
+    dm = OpenDataModule(args)
+    model = LitMLModel(args)
     trainer = pl.Trainer(
         gpus=args.gpus,
         amp_level='O2',
         precision=16,
         accelerator='ddp',
-        max_epochs=args.max_epochs,
-        checkpoint_callback=False,
-        logger=wandb_logger,
-        replace_sampler_ddp=False,
-        val_check_interval=0.5,
+        max_epochs=args.max_epochs
     )
-    trainer.fit(model)
+    trainer.fit(model, dm)
 
 if __name__ == '__main__':
-    parser = get_parser()
-    args = parser.parse_args()
-    args.num_classes = 2
-    args.dataroot = Path(args.dataroot)
-
-    pl.seed_everything(args.seed)
-
-    train_base_model(args)
-
+    fit()

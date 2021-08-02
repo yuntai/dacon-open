@@ -323,8 +323,10 @@ def prep_txt(tokenizer):
 
 def fit():
     from common import get_default_parser
+
     parser = get_default_parser()
     args = parser.parse_args()
+
     dm = OpenDataModule(args)
     model = LitMLModel(args)
 

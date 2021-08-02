@@ -68,6 +68,11 @@ def get_default_parser():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_classes', type=int, default=46)
     parser.add_argument('--max_seq_len', type=int, default=512)
+    parser.add_argument('--warmup_steps', type=int, default=300)
+
+    # wandb related
+    parser.add_argument('--project', type=str, default='dacon-open-mlm')
+    parser.add_argument('--name', type=str, default=None)
     return parser
 
 # create torch dataset

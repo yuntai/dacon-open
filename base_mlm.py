@@ -15,6 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchmetrics
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from pytorch_lightning.loggers import WandbLogger
 
 import pytorch_lightning as pl
 
@@ -80,7 +81,8 @@ class LitMLModel(pl.LightningModule):
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
 
-        self.loss_fct = F1_Loss(args.num_classes)
+        #self.loss_fct = F1_Loss(args.num_classes)
+        self.loss_fct = nn.CrossEntropyLoss()
 
         self.val_f1 = torchmetrics.F1(num_classes=args.num_classes, average='macro')
 
@@ -113,6 +115,9 @@ class LitMLModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         out = self.__step(batch)
+        lm_loss = out['lm_loss']
+        cls_loss = out['cls_loss']
+
         loss = out['lm_loss'] + out['cls_loss']
 
         cls_labels = out['cls_labels']
@@ -120,21 +125,23 @@ class LitMLModel(pl.LightningModule):
         self.val_f1(out['logits'], cls_labels)
         __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_f1', self.val_f1, **__kwargs)
-        self.log('val_loss', loss, **__kwargs)
+        self.log('val_loss', lm_loss + cls_loss, **__kwargs)
+        self.log('val_lm_loss', lm_loss, **__kwargs)
+        self.log('val_cls_loss', cls_loss, **__kwargs)
 
     def configure_callbacks(self):
         early_stop = EarlyStopping(
-            monitor="val_loss",
+            monitor="val_f1",
             min_delta=0.00,
-            mode="min",
+            mode="max",
             patience=3,
         )
         checkpoint = ModelCheckpoint(
             dirpath=f"./res/mlm_base={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
-            monitor="val_loss",
+            monitor="val_f1",
             save_top_k=3,
             filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
-            mode='min'
+            mode='max'
         )
         lr_monitor = LearningRateMonitor(logging_interval='step')
 
@@ -151,11 +158,10 @@ class LitMLModel(pl.LightningModule):
             "weight_decay": 0.0,
         }]
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
-
-        ___sz = 174304
+        ___sz = len(self.train_dataloader().dataset)
         num_batches = ___sz // self.hparams.batch_size
         num_training_steps = num_batches * self.hparams.max_epochs
-        num_warmup_steps = 0
+        num_warmup_steps = self.hparams.warmup_steps
 
         def lr_lambda(current_step: int):
             if current_step < num_warmup_steps:
@@ -321,12 +327,16 @@ def fit():
     args = parser.parse_args()
     dm = OpenDataModule(args)
     model = LitMLModel(args)
+
     trainer = pl.Trainer(
         gpus=args.gpus,
         amp_level='O2',
         precision=16,
         accelerator='ddp',
-        max_epochs=args.max_epochs
+        max_epochs=args.max_epochs,
+        logger=WandbLogger(project=args.project, name=args.name),
+        replace_sampler_ddp=False,
+        val_check_interval=0.5,
     )
     trainer.fit(model, dm)
 

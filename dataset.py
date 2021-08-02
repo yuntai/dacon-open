@@ -1,27 +1,26 @@
-import torch
+import os
 import argparse
 import random
 import numpy as np
-import os
-import torch.nn.functional as F
-import pytorch_lightning as pl
-from transformers import BertForMaskedLM, AutoTokenizer
 from typing import Optional
+
+from numpy.random import default_rng
 import pandas as pd
-from transformers import AdamW
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Dataset, DataLoader
-os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+import torchmetrics
 
-def get_parser():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--max_epochs', type=int, default=20)
-    parser.add_argument('--batch_size', type=int, default=16)
-    parser.add_argument('--gpus', type=int, default=2)
-    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
-    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    return parser
+import pytorch_lightning as pl
+
+from transformers import BertForMaskedLM, AutoTokenizer, AdamW
+
+from common import F1_Loss
+
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 class LitMLModel(pl.LightningModule):
     @staticmethod
@@ -32,13 +31,8 @@ class LitMLModel(pl.LightningModule):
         model = LitMLModel.load_from_checkpoint(ckpt_path)
         model.eval().cuda().freeze()
         args = model.hparams
-        args.base_model = 'bert-base-multilingual-cased'
-        args.cache_dir = './.cache'
         args.use_keywords = True
         args.use_english = True
-        args.cv_size = 5
-        args.cv = 0
-        args.seed = 42
         args.dataroot = pathlib.Path("/mnt/datasets/open")
         args.max_seq_len = 250
 
@@ -50,7 +44,7 @@ class LitMLModel(pl.LightningModule):
         hidden_states = []
         with torch.no_grad():
             for batch in tqdm(dl):
-                batch.pop('labels')
+                batch.pop('label')
                 item = {k:v.to('cuda') for k, v in batch.items()}
                 item['output_hidden_states'] = True
                 out = model(item)
@@ -73,15 +67,56 @@ class LitMLModel(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.save_hyperparameters(args)
-        self.model = BertForMaskedLM.from_pretrained('bert-base-multilingual-cased', cache_dir='./.cache')
+        self.model = BertForMaskedLM.from_pretrained(args.base_model, cache_dir=args.cache_dir)
+
+        config = self.model.config
+        self.activation = torch.nn.ReLU()
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
+
+        self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
+        self.classifier.bias.data.zero_()
+        self.loss_fct = F1_Loss()
+
+        self.val_f1 = torchmetrics.F1(num_classes=args.num_classes, average='macro')
 
     def forward(self, batch):
-        return self.model(**batch)
+        return self.__step(batch)
+
+    def __step(self, batch):
+        cls_labels = batch.pop('cls_labels')
+        out = self.model(**batch, output_hidden_states=True)
+        lm_loss = out['loss']
+        last_hidden_state = out['hidden_states'][-1]
+        pooled_hidden_state = last_hidden_state.mean(dim=1)
+        x = self.activation(pooled_hidden_state)
+        x = self.dropout(x)
+        logits = self.classifier(x)
+        #cls_loss = F.cross_entropy(logits, cls_labels)
+        cls_loss = self.loss_fct(logits, cls_labels)
+        return {
+            'lm_loss': lm_loss,
+            'cls_loss': cls_loss,
+            'last_hidden_state': last_hidden_state,
+            'logits': logits,
+            'cls_labels': cls_labels
+        }
 
     def training_step(self, batch, batch_idx):
-        out = self.model(**batch)
-        loss = out['loss']
+        out = self.__step(batch)
+        loss = out['lm_loss'] + out['cls_loss']
         return loss
+
+    def validation_step(self, batch, batch_idx):
+        out = self.__step(batch)
+        loss = out['lm_loss'] + out['cls_loss']
+
+        cls_labels = out['cls_labels']
+        #preds = logits.argmax(dim=1)
+        self.val_f1(out['logits'], cls_labels)
+        __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val_f1', self.val_f1, **__kwargs)
+        self.log('val_loss', loss, **__kwargs)
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -112,32 +147,35 @@ class LitMLModel(pl.LightningModule):
 
 class OpenDataModule(pl.LightningDataModule):
 
-    def __init__(self, batch_size):
+    def __init__(self, args):
         super().__init__()
-        self.batch_size = batch_size
+        self.batch_size = args.batch_size
+        self.args = args
+        self.prep_cache_path = f'./prep/{self.args.base_model}_mlm_prep.pkl'
 
     def prepare_data(self):
-        print("prepare_data")
         from common import with_cache
-        tokenizer = AutoTokenizer.from_pretrained('bert-base-multilingual-cased')
-        with_cache(prep_txt, 'mlm_prep.pkl')(tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
+        with_cache(prep_txt, self.prep_cache_path)(tokenizer)
 
     def setup(self, stage: Optional[str] = None):
-        print("stage=", stage)
         from common import with_cache
-        tokenizer = AutoTokenizer.from_pretrained('bert-base-multilingual-cased')
-        self.df = with_cache(prep_txt, 'mlm_prep.pkl')(tokenizer)
-        self.df = self.df[self.df.cv != 0]
-        self.ds = OpenMLMDataset(self.df, tokenizer)
+        tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
+        self.df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
+        self.tr_df = self.df[self.df.cv != 0]
+        self.va_df = self.df[self.df.cv == 0]
+
+        self.tr_ds = OpenMLMDataset(self.tr_df, tokenizer)
+        self.va_ds = OpenMLMDataset(self.va_df, tokenizer)
 
     def train_dataloader(self):
-        return DataLoader(self.ds, batch_size=self.batch_size)
-    #def val_dataloader(self):
-    #    return DataLoader(self.ds, batch_size=self.hparams.batch_size)
+        return DataLoader(self.tr_ds, batch_size=self.batch_size)
+
+    def val_dataloader(self):
+        return DataLoader(self.va_ds, batch_size=self.batch_size)
 
     #def test_dataloader(self):
     #    return DataLoader(self.ds, batch_size=self.hparams.batch_size)
-
 
 class OpenMLMDataset(torch.utils.data.Dataset):
     def __init__(self, df, tokenizer, max_seq_len=512, add_speical_tok=False, seed=42):
@@ -148,32 +186,36 @@ class OpenMLMDataset(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.seed = seed
         self.mask_id = tokenizer.all_special_ids[tokenizer.all_special_tokens.index(tokenizer.special_tokens_map['mask_token'])]
+        self.rng = default_rng(seed)
 
-    def random_word(self, tokens):
-        probs = np.random.rand(len(tokens))
-        labels = tokens.copy()
+    def random_words(self, toks):
+        probs = self.rng.random(len(toks))
+        lm_label = toks.copy()
         ix = probs < 0.15
-        tokens[ix] = self.mask_id
-        labels[~ix] = -100
-        return tokens, labels
+        toks[ix] = self.mask_id
+        lm_label[~ix] = -100
+        return toks, lm_label
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        np.random.shuffle(row.ixs)
+
+        self.rng.shuffle(row.ixs)
+
         toks = row.toks[row.ixs]
         tok_lens = row.tok_lens[row.ixs]
         toks = np.concatenate(toks).astype(int)
+        label = row.label
 
         if toks.size > self.max_seq_len:
             ovf = self.max_seq_len - toks.size
-            if np.random.randint(2) == 1:
+            if self.rng.random(1).item() < 0.5:
                 toks = toks[:ovf]
             else:
                 toks = toks[-ovf:]
 
-        toks, labels = self.random_word(toks)
+        toks, lm_label = self.random_words(toks)
         toks = torch.tensor(toks)
-        labels = torch.tensor(labels)
+        lm_label = torch.tensor(lm_label)
 
         sz = toks.size(0)
         attention_mask = torch.zeros(self.max_seq_len)
@@ -181,13 +223,17 @@ class OpenMLMDataset(torch.utils.data.Dataset):
 
         pad_sz = self.max_seq_len-sz
         toks = F.pad(toks, (0, pad_sz))
-        labels = F.pad(labels, (0, pad_sz), value=-100)
+        lm_label = F.pad(lm_label, (0, pad_sz), value=-100)
 
-        return {'input_ids': toks, 'attention_mask': attention_mask, 'labels': labels}
+        return {
+            'input_ids': toks,
+            'attention_mask': attention_mask,
+            'cls_labels': label,
+            'labels': lm_label
+        }
 
     def __len__(self):
         return self.df.shape[0]
-
 
 def prep_txt(tokenizer):
     from tqdm.auto import tqdm
@@ -232,9 +278,10 @@ def prep_txt(tokenizer):
     return df
 
 def fit():
-    parser = get_parser()
+    from common import get_default_parser
+    parser = get_default_parser()
     args = parser.parse_args()
-    dm = OpenDataModule(args.batch_size)
+    dm = OpenDataModule(args)
     model = LitMLModel(args)
     trainer = pl.Trainer(
         gpus=args.gpus,
@@ -244,3 +291,6 @@ def fit():
         max_epochs=args.max_epochs
     )
     trainer.fit(model, dm)
+
+if __name__ == '__main__':
+    fit()

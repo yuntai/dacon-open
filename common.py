@@ -1,15 +1,73 @@
 from pathlib import Path
+import random
+import functools
 import argparse
 import pandas as pd
 from transformers import AutoTokenizer
 from torch.utils.data import Dataset
 import re
 import torch
-import random
-import functools
+import torch.nn.functional as F
 
 #TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
 TOK_COLS = ['input_ids', 'attention_mask']
+
+class F1_Loss(torch.nn.Module):
+    '''Calculate F1 score. Can work with gpu tensors
+
+    The original implmentation is written by Michal Haltuf on Kaggle.
+
+    Returns
+    -------
+    torch.Tensor
+        `ndim` == 1. epsilon <= val <= 1
+
+    Reference
+    ---------
+    - https://www.kaggle.com/rejpalcz/best-loss-function-for-f1-score-metric
+    - https://scikit-learn.org/stable/modules/generated/sklearn.metrics.f1_score.html#sklearn.metrics.f1_score
+    - https://discuss.pytorch.org/t/calculating-precision-recall-and-f1-score-in-case-of-multi-label-classification/28265/6
+    - http://www.ryanzhang.info/python/writing-your-own-loss-function-module-for-pytorch/
+    '''
+    def __init__(self, epsilon=1e-7):
+        super().__init__()
+        self.epsilon = epsilon
+        self.num_classes = 46
+
+    def forward(self, y_pred, y_true,):
+        assert y_pred.ndim == 2
+        assert y_true.ndim == 1
+        y_true = F.one_hot(y_true, self.num_classes).to(torch.float32)
+        y_pred = F.softmax(y_pred, dim=1)
+
+        tp = (y_true * y_pred).sum(dim=0).to(torch.float32)
+        tn = ((1 - y_true) * (1 - y_pred)).sum(dim=0).to(torch.float32)
+        fp = ((1 - y_true) * y_pred).sum(dim=0).to(torch.float32)
+        fn = (y_true * (1 - y_pred)).sum(dim=0).to(torch.float32)
+
+        precision = tp / (tp + fp + self.epsilon)
+        recall = tp / (tp + fn + self.epsilon)
+
+        f1 = 2* (precision*recall) / (precision + recall + self.epsilon)
+        f1 = f1.clamp(min=self.epsilon, max=1-self.epsilon)
+        return 1 - f1.mean()
+
+def get_default_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--gpus', type=int, default=2)
+    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
+    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
+    parser.add_argument('--base_model', type=str, default='bert-base-multilingual-cased')
+    parser.add_argument('--cache_dir', type=str, default="./.cache")
+    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
+    parser.add_argument('--cv_size', type=int, default=5)
+    parser.add_argument('--cv', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--num_classes', type=int, default=46)
+    return parser
 
 # create torch dataset
 class OpenDataset(Dataset):
@@ -138,10 +196,10 @@ def get_tokenizer(base_model, **kwargs):
 def with_cache(func, cache_path):
     def __inner(*args, **kwargs):
         if Path(cache_path).exists():
-            print(f"FOUND {cache_path}")
+            print(f"CACHE FOUND {cache_path}")
             df = pd.read_pickle(cache_path)
         else:
-            print(f"NOT FOUND {cache_path}")
+            print(f"CACHE NOT FOUND {cache_path}")
             df = func(*args, **kwargs)
             print(f"saving to {cache_path} ...")
             df.to_pickle(cache_path)

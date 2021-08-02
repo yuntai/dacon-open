@@ -5,3 +5,4 @@ logs/
 lightning_logs/
 .cache/
 wandb/
+feats/

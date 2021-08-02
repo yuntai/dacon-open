@@ -197,9 +197,6 @@ class LitBaseModel(pl.LightningModule):
     def forward(self, batch):
         if 'labels' in batch:
             _ = batch.pop("labels")
-        input_ids = batch['input_ids']
-m       token_type_ids = batch.get('token_type_ids', None)
-        attention_mask = batch['attention_mask']
         return self.base_model(**batch)
 
     def validation_step(self, batch, batch_idx):

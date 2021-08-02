@@ -59,15 +59,17 @@ def get_parser():
     return parser
 
 class OpenSeqDataset(Dataset):
-    def __init__(self, df, dim=768, labels=None):
+    def __init__(self, df, dim=768, labels=None, is_training=True):
         self.df = df
-        #TODO: didnt need to convett to numpy from the beg
         max_seq_len = self.df['seq_len'].max()
         self.labels = labels
         self.zeros = torch.zeros(max_seq_len, dim)
+        self.is_training=is_training
 
     def __getitem__(self, idx):
         hs, seq_len = self.df.iloc[idx][['hs','seq_len']]
+        if self.is_training:
+            random.shuffle(hs)
         hs = torch.cat([hs, self.zeros[seq_len:]])
         ret = (hs, seq_len)
         if self.labels:
@@ -162,6 +164,8 @@ class LitOpenSeq(pl.LightningModule):
         self._init_weights(self.lin)
         self._init_weights(self.clf)
 
+        self.f1_loss = F1_Loss().cuda()
+
     def _init_weights(self, module):
         """Initialize the weights"""
         if isinstance(module, nn.Linear):
@@ -187,7 +191,7 @@ class LitOpenSeq(pl.LightningModule):
         weights = tr_df.pop('w').values.tolist()
 
         tr_ds = OpenSeqDataset(tr_df, labels=tr_df['label'].values.tolist())
-        va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist())
+        va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist(), is_training=False)
         return {'train': tr_ds, 'val': va_ds, 'weights': weights}
 
     def train_dataloader(self) -> DataLoader:
@@ -224,7 +228,8 @@ class LitOpenSeq(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.f1_loss(logits, labels)
+        #loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
         self.val_acc(preds, labels)
@@ -242,7 +247,8 @@ class LitOpenSeq(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.f1_loss(logits, labels)
+        #loss = F.cross_entropy(logits, labels)
         return loss
 
     def configure_optimizers(self):
@@ -274,7 +280,7 @@ class LitOpenSeq(pl.LightningModule):
         early_stop_callback_f1 = EarlyStopping(
             monitor='val_f1',
             min_delta=0.00,
-            patience=3,
+            patience=5,
             verbose=False,
             mode='max'
         )

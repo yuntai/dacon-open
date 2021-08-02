@@ -29,12 +29,12 @@ class F1_Loss(torch.nn.Module):
     - https://discuss.pytorch.org/t/calculating-precision-recall-and-f1-score-in-case-of-multi-label-classification/28265/6
     - http://www.ryanzhang.info/python/writing-your-own-loss-function-module-for-pytorch/
     '''
-    def __init__(self, epsilon=1e-7):
+    def __init__(self, num_classes, epsilon=1e-7):
         super().__init__()
         self.epsilon = epsilon
-        self.num_classes = 46
+        self.num_classes = num_classes
 
-    def forward(self, y_pred, y_true,):
+    def forward(self, y_pred, y_true):
         assert y_pred.ndim == 2
         assert y_true.ndim == 1
         y_true = F.one_hot(y_true, self.num_classes).to(torch.float32)
@@ -54,7 +54,7 @@ class F1_Loss(torch.nn.Module):
 
 def get_default_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--max_epochs', type=int, default=60)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
@@ -67,6 +67,7 @@ def get_default_parser():
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_classes', type=int, default=46)
+    parser.add_argument('--max_seq_len', type=int, default=512)
     return parser
 
 # create torch dataset

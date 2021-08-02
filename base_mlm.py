@@ -13,12 +13,16 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Dataset, DataLoader
 import torchmetrics
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
 import pytorch_lightning as pl
 
 from transformers import BertForMaskedLM, AutoTokenizer, AdamW
+from torch.utils.data.sampler import WeightedRandomSampler
 
 from common import F1_Loss
+from sampler import DistributedSamplerWrapper
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -34,7 +38,6 @@ class LitMLModel(pl.LightningModule):
         args.use_keywords = True
         args.use_english = True
         args.dataroot = pathlib.Path("/mnt/datasets/open")
-        args.max_seq_len = 250
 
         df = with_cache(prep, './prep/mlm_feat.pkl')(args)
 
@@ -179,25 +182,24 @@ class OpenDataModule(pl.LightningDataModule):
     def setup(self, stage: Optional[str] = None):
         from common import with_cache, get_weights
         tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
-        self.df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
-        tr_df = self.df[self.df.cv != 0]
+        df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
+
+        tr_df = df[df.cv != 0]
+        va_df = df[df.cv == 0]
 
         tr_df, weights = get_weights(tr_df)
         self.weights = weights
-
-        self.va_df = self.df[self.df.cv == 0]
 
         self.tr_ds = OpenMLMDataset(tr_df, tokenizer)
         self.va_ds = OpenMLMDataset(va_df, tokenizer)
 
     def train_dataloader(self):
-        from sampler import DistributedSampler
         weighted_sampler = WeightedRandomSampler(self.weights, len(self.weights))
         return DataLoader(
             self.tr_ds,
             batch_size=self.batch_size,
             shuffle=False,
-            sampler=DistributedSampler(weighted_sampler),
+            sampler=DistributedSamplerWrapper(weighted_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -206,7 +208,7 @@ class OpenDataModule(pl.LightningDataModule):
             self.va_ds,
             batch_size=self.batch_size,
             shuffle=False,
-            pin_memory=True
+            pin_memory=True,
             num_workers=16)
 
     #def test_dataloader(self):

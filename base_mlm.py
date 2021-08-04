@@ -19,7 +19,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 import pytorch_lightning as pl
 
-from transformers import BertForMaskedLM, AutoTokenizer, AdamW
+from transformers import BertForMaskedLM, AutoTokenizer, AdamW, AutoModel
 from torch.utils.data.sampler import WeightedRandomSampler
 
 from common import F1_Loss
@@ -71,12 +71,12 @@ class LitMLModel(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.save_hyperparameters(args)
-        self.model = BertForMaskedLM.from_pretrained(self.hparams.base_model, cache_dir=self.hparams.cache_dir)
+        self.model = AutoModel.from_pretrained(self.hparams.base_model, cache_dir=self.hparams.cache_dir)
 
         config = self.model.config
         self.activation = torch.nn.ReLU()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, self.hparams.num_classes)
+        self.classifier = nn.Linear(config.hidden_size*2, self.hparams.num_classes)
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
@@ -85,23 +85,30 @@ class LitMLModel(pl.LightningModule):
         self.loss_fct = nn.CrossEntropyLoss()
 
         self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
+        self.val_precision = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
+        self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
 
     def forward(self, batch):
         return self.__step(batch)
 
     def __step(self, batch):
         cls_labels = batch.pop('cls_labels')
+        labels = batch.pop('labels')
         out = self.model(**batch, output_hidden_states=True)
-        lm_loss = out['loss']
-        last_hidden_state = out['hidden_states'][-1]
-        pooled_hidden_state = last_hidden_state.mean(dim=1)
+        #lm_loss = out['loss']
+        last_hidden_state = out['last_hidden_state']
+
+        pooled_hidden_state1 = last_hidden_state.mean(dim=1)
+        pooled_hidden_state2 = last_hidden_state.max(dim=1)[0]
+        pooled_hidden_state = torch.cat([pooled_hidden_state1, pooled_hidden_state2], dim=-1)
+
         x = self.activation(pooled_hidden_state)
         x = self.dropout(x)
         logits = self.classifier(x)
         #cls_loss = F.cross_entropy(logits, cls_labels)
         cls_loss = self.loss_fct(logits, cls_labels)
         return {
-            'lm_loss': lm_loss,
+            #'lm_loss': lm_loss,
             'cls_loss': cls_loss,
             'last_hidden_state': last_hidden_state,
             'logits': logits,
@@ -110,24 +117,25 @@ class LitMLModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         out = self.__step(batch)
-        loss = out['lm_loss'] + out['cls_loss']
+        #loss = out['lm_loss'] + out['cls_loss']
+        loss = out['cls_loss']
         return loss
 
     def validation_step(self, batch, batch_idx):
         out = self.__step(batch)
-        lm_loss = out['lm_loss']
+        #lm_loss = out['lm_loss']
         cls_loss = out['cls_loss']
 
-        loss = out['lm_loss'] + out['cls_loss']
+        #loss = out['lm_loss'] + out['cls_loss']
+        loss = out['cls_loss']
 
         cls_labels = out['cls_labels']
-        #preds = logits.argmax(dim=1)
         self.val_f1(out['logits'], cls_labels)
         __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_f1', self.val_f1, **__kwargs)
-        self.log('val_loss', lm_loss + cls_loss, **__kwargs)
-        self.log('val_lm_loss', lm_loss, **__kwargs)
-        self.log('val_cls_loss', cls_loss, **__kwargs)
+        self.log('val_loss', cls_loss, **__kwargs)
+        #self.log('val_lm_loss', lm_loss, **__kwargs)
+        #self.log('val_cls_loss', cls_loss, **__kwargs)
 
     def configure_callbacks(self):
         early_stop = EarlyStopping(
@@ -222,7 +230,7 @@ class OpenDataModule(pl.LightningDataModule):
     #    return DataLoader(self.ds, batch_size=self.hparams.batch_size)
 
 class OpenMLMDataset(torch.utils.data.Dataset):
-    def __init__(self, df, tokenizer, max_seq_len=512, add_speical_tok=False, seed=42, is_training=True):
+    def __init__(self, df, tokenizer, max_seq_len=256, add_speical_tok=False, seed=42, is_training=True):
         super().__init__()
         self.df = df.copy()
         self.max_seq_len = max_seq_len
@@ -244,8 +252,8 @@ class OpenMLMDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
 
-        if self.is_training:
-            self.rng.shuffle(row.ixs)
+        #if self.is_training:
+        self.rng.shuffle(row.ixs)
 
         toks = row.toks[row.ixs]
         tok_lens = row.tok_lens[row.ixs]
@@ -263,6 +271,7 @@ class OpenMLMDataset(torch.utils.data.Dataset):
             toks, lm_label = self.random_words(toks)
         else:
             lm_label = toks.copy()
+
         toks = torch.tensor(toks)
         lm_label = torch.tensor(lm_label)
 
@@ -286,7 +295,7 @@ class OpenMLMDataset(torch.utils.data.Dataset):
 
 def prep_txt(tokenizer):
     from tqdm.auto import tqdm
-    from common import prep_cv
+    from common import prep_cv, clean_text
 
     df = pd.read_csv("/mnt/datasets/open/train.csv")
     df = prep_cv(df)
@@ -300,7 +309,7 @@ def prep_txt(tokenizer):
         'return_tensors': None,
     }
 
-    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
+    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과', '요약문_한글키워드', '요약문_영문키워드']
     df[cols] = df[cols].fillna('')
 
     toks_lst = []
@@ -308,6 +317,8 @@ def prep_txt(tokenizer):
     for t in tqdm(df[cols].itertuples()):
         t = t[1:]
         sents = sum([t[i].split('\n') for i in range(len(cols))], [])
+        sents = [s.strip() for s in sents if len(s.strip()) > 0]
+        sents = [clean_text(s) for s in sents]
         sents = [s.strip() for s in sents if len(s.strip()) > 0]
         toks = tokenizer(sents, **kwargs)['input_ids']
         toks_lst.append(np.array(toks,dtype=object))
@@ -353,5 +364,5 @@ def fit():
     )
     trainer.fit(model, dm)
 
-#if __name__ == '__main__':
-#    fit()
+if __name__ == '__main__':
+    fit()

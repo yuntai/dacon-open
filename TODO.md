@@ -1,6 +1,8 @@
-- xlm & keywords defnitely helpful
-- clean text seems helpful
+- xlm & keywords defnitely helpful [o]
+- clean text seems helpful [o]
 - avg & max & ff pooling & [CLS] pooling
+- more cleaning text?
+- shorten max_len_seq (seems overfitting)
 
 - pooling sweep
 avg max ff [CLS]
@@ -25,5 +27,6 @@ check distribtedwrapper
 - early stopping based on loss / no stopping (w/ correct sampler cross entropy loss aligned with f1)
 - check weighted sampler working [o] - obviously better
 - soft f1 loss doesn't seem to work well [x]
+- MLM doesn't really work?
 
 

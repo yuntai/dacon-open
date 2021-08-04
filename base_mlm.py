@@ -71,12 +71,12 @@ class LitMLModel(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
         self.save_hyperparameters(args)
-        self.model = BertForMaskedLM.from_pretrained(args.base_model, cache_dir=args.cache_dir)
+        self.model = BertForMaskedLM.from_pretrained(self.hparams.base_model, cache_dir=self.hparams.cache_dir)
 
         config = self.model.config
         self.activation = torch.nn.ReLU()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
+        self.classifier = nn.Linear(config.hidden_size, self.hparams.num_classes)
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
@@ -84,7 +84,7 @@ class LitMLModel(pl.LightningModule):
         #self.loss_fct = F1_Loss(args.num_classes)
         self.loss_fct = nn.CrossEntropyLoss()
 
-        self.val_f1 = torchmetrics.F1(num_classes=args.num_classes, average='macro')
+        self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
 
     def forward(self, batch):
         return self.__step(batch)
@@ -198,7 +198,7 @@ class OpenDataModule(pl.LightningDataModule):
         self.weights = weights
 
         self.tr_ds = OpenMLMDataset(tr_df, tokenizer)
-        self.va_ds = OpenMLMDataset(va_df, tokenizer)
+        self.va_ds = OpenMLMDataset(va_df, tokenizer, is_training=False)
 
     def train_dataloader(self):
         weighted_sampler = WeightedRandomSampler(self.weights, len(self.weights))
@@ -222,15 +222,16 @@ class OpenDataModule(pl.LightningDataModule):
     #    return DataLoader(self.ds, batch_size=self.hparams.batch_size)
 
 class OpenMLMDataset(torch.utils.data.Dataset):
-    def __init__(self, df, tokenizer, max_seq_len=512, add_speical_tok=False, seed=42):
+    def __init__(self, df, tokenizer, max_seq_len=512, add_speical_tok=False, seed=42, is_training=True):
         super().__init__()
         self.df = df.copy()
         self.max_seq_len = max_seq_len
         self.add_speical_tok = add_speical_tok
         self.tokenizer = tokenizer
-        self.seed = seed
         self.mask_id = tokenizer.all_special_ids[tokenizer.all_special_tokens.index(tokenizer.special_tokens_map['mask_token'])]
+        self.seed = seed
         self.rng = default_rng(seed)
+        self.is_training = is_training
 
     def random_words(self, toks):
         probs = self.rng.random(len(toks))
@@ -243,7 +244,8 @@ class OpenMLMDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
 
-        self.rng.shuffle(row.ixs)
+        if self.is_training:
+            self.rng.shuffle(row.ixs)
 
         toks = row.toks[row.ixs]
         tok_lens = row.tok_lens[row.ixs]
@@ -257,7 +259,10 @@ class OpenMLMDataset(torch.utils.data.Dataset):
             else:
                 toks = toks[-ovf:]
 
-        toks, lm_label = self.random_words(toks)
+        if self.is_training:
+            toks, lm_label = self.random_words(toks)
+        else:
+            lm_label = toks.copy()
         toks = torch.tensor(toks)
         lm_label = torch.tensor(lm_label)
 
@@ -321,6 +326,12 @@ def prep_txt(tokenizer):
 
     return df
 
+def validate(ckpt):
+    model = LitMLModel.load_from_checkpoint(ckpt)
+    dm = OpenDataModule(argparse.Namespace(**model.hparams))
+    trainer = pl.Trainer(gpus=1)
+    trainer.validate(model, dm)
+
 def fit():
     from common import get_default_parser
 
@@ -342,5 +353,5 @@ def fit():
     )
     trainer.fit(model, dm)
 
-if __name__ == '__main__':
-    fit()
+#if __name__ == '__main__':
+#    fit()

@@ -50,6 +50,8 @@ def get_parser():
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
 
+    parser.add_argument('--num_classes', type=int, default=46)
+
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
@@ -57,6 +59,7 @@ def get_parser():
     parser.add_argument('--base_model', choices=MODELS, default='bert-base-multilingual-cased')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
+
 
     parser.add_argument('--use_keywords', dest='use_keywords', action='store_true')
     parser.add_argument('--no_use_keywords', dest='use_keywords', action='store_false')
@@ -102,7 +105,6 @@ class LitBaseModel(pl.LightningModule):
     def load_from_ckpt(ckpt_path):
         ckpt = torch.load(ckpt_path)
         args = argparse.Namespace(**ckpt['hyper_parameters'])
-        args.num_classes = 46
         model = LitBaseModel(args)
         state_dict = ckpt['state_dict']
         state_dict = {k.replace("model.", "base_model."):v for k,v in state_dict.items()}
@@ -201,7 +203,7 @@ class LitBaseModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         labels = batch.pop("labels")
-        logits = self.model(**batch)['logits']
+        logits = self.base_model(**batch)['logits']
         loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
@@ -219,12 +221,12 @@ class LitBaseModel(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         labels = batch.pop("labels")
-        logits = self.model(**batch)['logits']
+        logits = self.base_model(**batch)['logits']
         loss = F.cross_entropy(logits, labels)
         return loss
 
     def train_dataloader(self) -> DataLoader:
-        from sampler import DistributedSampler
+        from sampler import DistributedSamplerWrapper
 
         w = self.get_datasets()['weights']
         weighted_sampler = WeightedRandomSampler(w, len(w))
@@ -233,7 +235,7 @@ class LitBaseModel(pl.LightningModule):
             self.get_datasets()['train'],
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            sampler=DistributedSampler(weighted_sampler),
+            sampler=DistributedSamplerWrapper(weighted_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -256,12 +258,11 @@ class LitBaseModel(pl.LightningModule):
 
         df = with_cache(prep, self.cache_path)(self.hparams)
         #TODO: custom mapping for hiearchical classification?
-        df.loc[df.label > 0, 'label'] = 1
+        #df.loc[df.label > 0, 'label'] = 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        tr_df = get_weights(tr_df)
-        weights = tr_df.pop('w').values.tolist()
+        tr_df, weights = get_weights(tr_df)
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
@@ -271,11 +272,11 @@ class LitBaseModel(pl.LightningModule):
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [{
-            "params": [p for n, p in self.model.named_parameters() if not any(nd in n for nd in no_decay)],
+            "params": [p for n, p in self.base_model.named_parameters() if not any(nd in n for nd in no_decay)],
             "weight_decay": self.hparams.weight_decay,
         },
         {
-            "params": [p for n, p in self.model.named_parameters() if any(nd in n for nd in no_decay)],
+            "params": [p for n, p in self.base_model.named_parameters() if any(nd in n for nd in no_decay)],
             "weight_decay": 0.0,
         }]
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
@@ -334,7 +335,6 @@ def train_base_model(args):
 if __name__ == '__main__':
     parser = get_parser()
     args = parser.parse_args()
-    args.num_classes = 2
     args.dataroot = Path(args.dataroot)
 
     pl.seed_everything(args.seed)

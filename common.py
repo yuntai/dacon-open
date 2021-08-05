@@ -62,7 +62,7 @@ def get_default_parser():
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
     parser.add_argument('--base_model', type=str, default='xlm-roberta-base')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
-    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
+    parser.add_argument('--dataroot', type=str, default="./datasets")
     parser.add_argument('--cv_size', type=int, default=5)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
@@ -75,20 +75,6 @@ def get_default_parser():
     parser.add_argument('--name', type=str, default=None)
     return parser
 
-# create torch dataset
-class OpenDataset(Dataset):
-    def __init__(self, df, labels=None):
-        self.df = df
-        self.labels = labels
-
-    def __getitem__(self, idx):
-        item = {k: torch.tensor(v) for k, v in self.df.iloc[idx].to_dict().items()}
-        if self.labels:
-            item["labels"] = torch.tensor(self.labels[idx])
-        return item
-
-    def __len__(self):
-        return self.df.shape[0]
 
 def get_split(text1, chunk_size=250, overlap_pct=0.25):
     words = text1.split()
@@ -232,3 +218,9 @@ def get_dataset(df, is_test=False):
     if not is_test:
         y = df['label'].values.tolist()
     return OpenDataset(X, y)
+
+def isin_ipython():
+    try:
+        return get_ipython().__class__.__name__ == 'TerminalInteractiveShell'
+    except NameError:
+        return False      # Probably standard Python interpreter

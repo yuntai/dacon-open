@@ -6,4 +6,5 @@ lightning_logs/
 .cache/
 wandb/
 feats/
-backup/
+datasets
+tmp/

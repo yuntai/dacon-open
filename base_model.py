@@ -40,6 +40,30 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# create torch dataset
+class OpenDataset(Dataset):
+    def __init__(self, df, labels=None):
+        self.df = df
+        if labels:
+            self.targets = torch.LongTensor(labels)
+        else:
+            self.targets = None
+
+    def __getitem__(self, idx):
+        #TODO: conversion to tensor necessario?
+        item = {k: torch.tensor(v) for k, v in self.df.iloc[idx].to_dict().items()}
+        if self.targets is not None:
+            item["labels"] = self.targets[idx]
+        return item
+
+    def __len__(self):
+        return self.df.shape[0]
+
+def get_dataset(df, is_test=False):
+    X = df[['input_ids', 'attention_mask']]
+    y = df['label'].values.tolist() if not is_test else None
+    return OpenDataset(X, y)
+
 def get_parser():
 
     parser = argparse.ArgumentParser()
@@ -113,7 +137,7 @@ class LitBaseModel(pl.LightningModule):
 
     @staticmethod
     def extract_feature(ckpt_path, test_cache_path=None):
-        from common import prep, cv_split, get_dataset, with_cache
+        from common import prep, cv_split, with_cache
         is_test = test_cache_path is not None
         m, args = LitBaseModel.load_from_ckpt(ckpt_path)
         m.eval().cuda().freeze()
@@ -226,24 +250,24 @@ class LitBaseModel(pl.LightningModule):
         return loss
 
     def train_dataloader(self) -> DataLoader:
-        from sampler import DistributedSamplerWrapper
+        from sampler import DistributedWeightedSampler
 
-        w = self.get_datasets()['weights']
-        weighted_sampler = WeightedRandomSampler(w, len(w))
+        #w = self.get_datasets()['weights']
+        #weighted_sampler = WeightedRandomSampler(w, len(w))
 
         return DataLoader(
-            self.get_datasets()['train'],
+            self.datasets['train'],
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            sampler=DistributedSamplerWrapper(weighted_sampler),
+            sampler=DistributedWeightedSampler(self.datasets['train']),
             pin_memory=True,
             num_workers=16)
 
     def val_dataloader(self) -> DataLoader:
-        return DataLoader(self.get_datasets()['val'], batch_size=self.hparams.batch_size, num_workers=16)
+        return DataLoader(self.datasets['val'], batch_size=self.hparams.batch_size, num_workers=16)
 
-    # @property raises torch.nn.modules.module.ModuleAttributeError
-    def get_datasets(self):
+    @property
+    def datasets(self):
         if self._datasets is None:
             self._datasets = self.load_datasets()
 
@@ -254,20 +278,16 @@ class LitBaseModel(pl.LightningModule):
         with_cache(prep, self.cache_path)(self.hparams)
 
     def load_datasets(self):
-        from common import prep, cv_split, get_weights, get_dataset, with_cache
+        from common import prep, cv_split, get_weights, with_cache
 
         df = with_cache(prep, self.cache_path)(self.hparams)
-        #TODO: custom mapping for hiearchical classification?
-        #df.loc[df.label > 0, 'label'] = 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
-
-        tr_df, weights = get_weights(tr_df)
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
 
-        return {'train': tr_ds, 'val': va_ds, 'weights': weights}
+        return {'train': tr_ds, 'val': va_ds}
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -281,7 +301,7 @@ class LitBaseModel(pl.LightningModule):
         }]
         optimizer = AdamW(optimizer_grouped_parameters, lr=self.hparams.learning_rate, eps=self.hparams.adam_epsilon)
 
-        num_batches = len(self.get_datasets()['train']) // self.hparams.batch_size
+        num_batches = len(self.datasets['train']) // self.hparams.batch_size
         num_training_steps = num_batches * self.hparams.max_epochs
         num_warmup_steps = 0
 
@@ -332,7 +352,7 @@ def train_base_model(args):
     )
     trainer.fit(model)
 
-if __name__ == '__main__':
+if __name__ == '__main__' and not common.isin_ipython():
     parser = get_parser()
     args = parser.parse_args()
     args.dataroot = Path(args.dataroot)

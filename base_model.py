@@ -239,16 +239,15 @@ class LitBaseModel(pl.LightningModule):
         return loss
 
     def train_dataloader(self) -> DataLoader:
-        from sampler import DistributedSamplerWrapper
-
-        w = self.datasets['weights']
-        weighted_sampler = WeightedRandomSampler(w, len(w))
-
+        from sampler import DynamicBalanceClassSampler, DistributedSamplerWrapper
+        ds = self.datasets['train']
+        train_labels = ds.targets.cpu().numpy().tolist()
+        train_sampler = DynamicBalanceClassSampler(train_labels)
         return DataLoader(
             ds,
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            sampler=DistributedSamplerWrapper(weighted_sampler),
+            sampler=DistributedSamplerWrapper(train_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -262,7 +261,7 @@ class LitBaseModel(pl.LightningModule):
 
         from common import prep, cv_split, get_weights, with_cache
 
-        df = with_cache(prep, self.cache_path)(self.hparams)
+        df = with_cache(prep, self.hparams.cache_path)(self.hparams)
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
         tr_df, weights = get_weights(tr_df)
@@ -276,7 +275,7 @@ class LitBaseModel(pl.LightningModule):
 
     def prepare_data(self):
         from common import prep, with_cache
-        with_cache(prep, self.cache_path)(self.hparams)
+        with_cache(prep, self.hparams.cache_path)(self.hparams)
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -322,7 +321,7 @@ class LitBaseModel(pl.LightningModule):
         return [early_stop, checkpoint, lr_monitor]
 
 def train_base_model(args):
-    model = LitBaseModel(args)
+    model = LitBaseModel(**args.__dict__)
 
     wandb_logger = WandbLogger(
         project=args.project,

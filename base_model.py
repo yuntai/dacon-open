@@ -103,7 +103,6 @@ def get_parser():
 class BaseClassifier(nn.Module):
     def __init__(self, args):
         super().__init__()
-        print("args=", args)
         self.m = AutoModel.from_pretrained(args.base_model, cache_dir=args.cache_dir)
         config = self.m.config
 
@@ -125,16 +124,6 @@ class BaseClassifier(nn.Module):
         return {'logits': logits, 'hidden': hidden}
 
 class LitBaseModel(pl.LightningModule):
-    @staticmethod
-    def load_from_ckpt(ckpt_path):
-        ckpt = torch.load(ckpt_path)
-        args = argparse.Namespace(**ckpt['hyper_parameters'])
-        model = LitBaseModel(args)
-        state_dict = ckpt['state_dict']
-        state_dict = {k.replace("model.", "base_model."):v for k,v in state_dict.items()}
-        model.load_state_dict(state_dict)
-        return model, args
-
     @staticmethod
     def extract_feature(ckpt_path, test_cache_path=None):
         from common import prep, cv_split, with_cache
@@ -178,14 +167,15 @@ class LitBaseModel(pl.LightningModule):
 
     @staticmethod
     def eval_from_ckpt(ckpt_path):
-        from common import prep, cv_split, get_dataset, with_cache
-        m, args = LitBaseModel.load_from_ckpt(ckpt_path)
+        from common import prep, cv_split, with_cache
+        m = LitBaseModel.load_from_checkpoint(ckpt_path)
         m.eval().cuda().freeze()
 
-        df = with_cache(prep, m.cache_path)(args)
-        _, va_df = cv_split(df, args.cv)
+        # TODO: w/ trainer
+        df = with_cache(prep, m.hparams.cache_path)(args)
+        _, va_df = cv_split(df, m.hparams.cv)
         va_ds = get_dataset(va_df)
-        va_loader = DataLoader(va_ds, batch_size=32, shuffle=False)
+        va_loader = DataLoader(va_ds, batch_size=64, shuffle=False)
 
         preds, labels = [], []
         with torch.no_grad():
@@ -200,14 +190,17 @@ class LitBaseModel(pl.LightningModule):
         print(classification_report(labels, preds))
         return (preds, labels)
 
-    def __init__(self, args):
+    def __init__(self, **kwargs):
         super().__init__()
+        if 'cache_path' not in kwargs:
+            tmpl = './prep/seed={seed}&max_seq_len={max_seq_len}&base_model={base_model}&use_keywords={use_keywords}&use_english={use_english}.pkl'
+            kwargs['cache_path'] = tmpl.format(**kwargs)
 
-        self.save_hyperparameters(args)
+        self.save_hyperparameters(kwargs)
 
-        self.base_model = BaseClassifier(args)
+        self.base_model = BaseClassifier(self.hparams)
 
-        __kwargs = {'num_classes': args.num_classes, 'average':'macro'}
+        __kwargs = {'num_classes': self.hparams.num_classes, 'average':'macro'}
 
         self.val_f1 = torchmetrics.F1(**__kwargs)
         self.val_acc = torchmetrics.Accuracy(**__kwargs)
@@ -215,10 +208,6 @@ class LitBaseModel(pl.LightningModule):
         self.val_precision = torchmetrics.Precision(**__kwargs)
 
         self._datasets = None
-
-        base_model = args.base_model.replace('/', '-')
-        cache_path = f'./prep/{args.seed=}&{args.max_seq_len=}&{base_model=}&{args.use_keywords=}&{args.use_english=}.pkl'
-        self.cache_path = cache_path.replace('args.','')
 
     def forward(self, batch):
         if 'labels' in batch:
@@ -256,7 +245,7 @@ class LitBaseModel(pl.LightningModule):
         weighted_sampler = WeightedRandomSampler(w, len(w))
 
         return DataLoader(
-            self.datasets['train'],
+            ds,
             batch_size=self.hparams.batch_size,
             shuffle=False,
             sampler=DistributedSamplerWrapper(weighted_sampler),

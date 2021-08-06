@@ -80,7 +80,7 @@ def get_parser():
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
     MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
-    parser.add_argument('--base_model', choices=MODELS, default='bert-base-multilingual-cased')
+    parser.add_argument('--base_model', choices=MODELS, default='xlm-roberta-base')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
 
@@ -250,16 +250,16 @@ class LitBaseModel(pl.LightningModule):
         return loss
 
     def train_dataloader(self) -> DataLoader:
-        from sampler import DistributedWeightedSampler
+        from sampler import DistributedSamplerWrapper
 
-        #w = self.get_datasets()['weights']
-        #weighted_sampler = WeightedRandomSampler(w, len(w))
+        w = self.datasets['weights']
+        weighted_sampler = WeightedRandomSampler(w, len(w))
 
         return DataLoader(
             self.datasets['train'],
             batch_size=self.hparams.batch_size,
             shuffle=False,
-            sampler=DistributedWeightedSampler(self.datasets['train']),
+            sampler=DistributedSamplerWrapper(weighted_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -268,26 +268,26 @@ class LitBaseModel(pl.LightningModule):
 
     @property
     def datasets(self):
-        if self._datasets is None:
-            self._datasets = self.load_datasets()
+        if self._datasets:
+            return self._datasets
+
+        from common import prep, cv_split, get_weights, with_cache
+
+        df = with_cache(prep, self.cache_path)(self.hparams)
+
+        tr_df, va_df = cv_split(df, self.hparams.cv)
+        tr_df, weights = get_weights(tr_df)
+
+        tr_ds = get_dataset(tr_df)
+        va_ds = get_dataset(va_df)
+
+        self._datasets = {'train': tr_ds, 'val': va_ds, 'weights': weights}
 
         return self._datasets
 
     def prepare_data(self):
         from common import prep, with_cache
         with_cache(prep, self.cache_path)(self.hparams)
-
-    def load_datasets(self):
-        from common import prep, cv_split, get_weights, with_cache
-
-        df = with_cache(prep, self.cache_path)(self.hparams)
-
-        tr_df, va_df = cv_split(df, self.hparams.cv)
-
-        tr_ds = get_dataset(tr_df)
-        va_ds = get_dataset(va_df)
-
-        return {'train': tr_ds, 'val': va_ds}
 
     def configure_optimizers(self):
         no_decay = ["bias", "LayerNorm.weight"]

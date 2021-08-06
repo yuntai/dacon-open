@@ -13,10 +13,20 @@ avg max ff [CLS]
      o  o 
 
 #### (A) check blanced batch/trimming
-- [ ] check MolBert (%collate_fn)
+- [o] check MolBert (%collate_fn)
 - [ ] check https://github.com/catalyst-team/catalyst/blob/master/catalyst/data/sampler.py
+      try BalanceClassSampler
 - [o] check distribtedwrapper 
   seems Wrapper w/ WeightedRandom Sampler have problem
+- [ ] check classification report
+
+## PLAN
+- seems DistributedSamplerWrapper works fine why unbalnced recall/precision?
+- balance batching
+- comparision MLM / normal
+- additional cleaning text
+- LSTM classification
+- traini ng with whole data
 
 ##### hiearchical?
 

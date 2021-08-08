@@ -311,7 +311,7 @@ class LitBaseModel(pl.LightningModule):
         )
 
         name = self.trainer.logger.experiment.name
-        logger.log(f"exp {name=}")
+        logger.info(f"exp {name=}")
         checkpoint = ModelCheckpoint(
             dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{name}",
             monitor="val_f1",

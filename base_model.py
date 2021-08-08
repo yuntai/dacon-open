@@ -69,7 +69,7 @@ def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_seq_len', type=int, default=250)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--max_epochs', type=int, default=40)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
@@ -84,7 +84,6 @@ def get_parser():
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
 
-
     parser.add_argument('--use_keywords', dest='use_keywords', action='store_true')
     parser.add_argument('--no_use_keywords', dest='use_keywords', action='store_false')
     parser.set_defaults(use_keywords=True)
@@ -96,7 +95,6 @@ def get_parser():
 
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open')
-    parser.add_argument('--name', type=str, default=None)
 
     return parser
 
@@ -297,8 +295,10 @@ class LitBaseModel(pl.LightningModule):
             if current_step < num_warmup_steps:
                 return float(current_step) / float(max(1, num_warmup_steps))
             return max(
-                0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
+                0.0,
+                float(num_training_steps-current_step) / float(max(1, num_training_steps-num_warmup_steps))
             )
+
         lr_scheduler = LambdaLR(optimizer, lr_lambda, -1)
         return [optimizer], [{"scheduler": lr_scheduler, "interval": "step"}]
 

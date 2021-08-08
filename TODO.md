@@ -26,6 +26,8 @@ avg max ff [CLS]
 https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%221bakX6mLeutpEDVDHi_M2zuqZ7OYG3yJl%22%5D%2C%22action%22%3A%22open%22%2C%22userId%22%3A%22108577906332508460772%22%2C%22resourceKeys%22%3A%7B%7D%7D&kami_user_id=5164017
 - dynamic curriculum learning
 https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%2218Uer9efFKPzvr5Sr5DDdWDY1q6El37F9%22%5D%2C%22action%22%3A%22open%22%2C%22userId%22%3A%22108577906332508460772%22%2C%22resourceKeys%22%3A%7B%7D%7D&kami_user_id=5164017
+- [ ] h transformer
+- works better with no under/over-sampling
 
 ## PLAN
 - unserstand what's going on with precision/recall imbalance and it's affect on f1 score

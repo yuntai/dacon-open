@@ -69,7 +69,7 @@ def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_seq_len', type=int, default=250)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=20)
+    parser.add_argument('--max_epochs', type=int, default=40)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
@@ -84,7 +84,6 @@ def get_parser():
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
 
-
     parser.add_argument('--use_keywords', dest='use_keywords', action='store_true')
     parser.add_argument('--no_use_keywords', dest='use_keywords', action='store_false')
     parser.set_defaults(use_keywords=True)
@@ -96,7 +95,6 @@ def get_parser():
 
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open')
-    parser.add_argument('--name', type=str, default=None)
 
     return parser
 
@@ -241,13 +239,13 @@ class LitBaseModel(pl.LightningModule):
     def train_dataloader(self) -> DataLoader:
         from sampler import DynamicBalanceClassSampler, DistributedSamplerWrapper
         ds = self.datasets['train']
-        train_labels = ds.targets.cpu().numpy().tolist()
-        train_sampler = DynamicBalanceClassSampler(train_labels)
+        #train_labels = ds.targets.cpu().numpy().tolist()
+        #train_sampler = DynamicBalanceClassSampler(train_labels, exp_lambda=0.95)
         return DataLoader(
             ds,
             batch_size=self.hparams.batch_size,
-            shuffle=False,
-            sampler=DistributedSamplerWrapper(train_sampler),
+            shuffle=True,
+            #sampler=DistributedSamplerWrapper(train_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -297,8 +295,10 @@ class LitBaseModel(pl.LightningModule):
             if current_step < num_warmup_steps:
                 return float(current_step) / float(max(1, num_warmup_steps))
             return max(
-                0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
+                0.0,
+                float(num_training_steps-current_step) / float(max(1, num_training_steps-num_warmup_steps))
             )
+
         lr_scheduler = LambdaLR(optimizer, lr_lambda, -1)
         return [optimizer], [{"scheduler": lr_scheduler, "interval": "step"}]
 
@@ -309,12 +309,16 @@ class LitBaseModel(pl.LightningModule):
             mode="max",
             patience=3,
         )
+
+        name = self.trainer.logger.experiment.name
+        logger.log(f"exp {name=}")
         checkpoint = ModelCheckpoint(
-            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
+            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{name}",
             monitor="val_f1",
             save_top_k=3,
             filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
-            mode='max'
+            mode='max',
+            every_n_epochs=1,
         )
         lr_monitor = LearningRateMonitor(logging_interval='step')
 
@@ -323,10 +327,6 @@ class LitBaseModel(pl.LightningModule):
 def train_base_model(args):
     model = LitBaseModel(**args.__dict__)
 
-    wandb_logger = WandbLogger(
-        project=args.project,
-        name=args.name
-    )
     trainer = pl.Trainer(
         gpus=args.gpus,
         amp_level='O2',
@@ -334,8 +334,8 @@ def train_base_model(args):
         accelerator='ddp',
         max_epochs=args.max_epochs,
         checkpoint_callback=False,
-        logger=wandb_logger,
-        replace_sampler_ddp=False,
+        logger=WandbLogger(project=args.project),
+        replace_sampler_ddp=True,
         val_check_interval=0.5,
     )
     trainer.fit(model)

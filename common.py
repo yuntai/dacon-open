@@ -87,6 +87,24 @@ def get_split(text1, chunk_size=250, overlap_pct=0.25):
 
     return list(map(lambda x: " ".join(x), res))
 
+class OpenDataset(Dataset):
+    def __init__(self, df, labels=None):
+        self.df = df
+        if labels:
+            self.targets = torch.LongTensor(labels)
+        else:
+            self.targets = None
+
+    def __getitem__(self, idx):
+        #TODO: conversion to tensor necessario?
+        item = {k: torch.tensor(v) for k, v in self.df.iloc[idx].to_dict().items()}
+        if self.targets is not None:
+            item["labels"] = self.targets[idx]
+        return item
+
+    def __len__(self):
+        return self.df.shape[0]
+
 def clean_text(s):
     #s = re.sub("[^가-힣ㄱ-하-ㅣ]", " ", s)
     #s = re.sub('[^A-Za-z가-힣ㄱ-하-ㅣ]+', ' ', s)

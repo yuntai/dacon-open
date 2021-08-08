@@ -11,6 +11,7 @@ import common
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.sampler import WeightedRandomSampler
+from torch.utils.data import DistributedSampler
 
 # https://pytorch.org/docs/stable/distributed.html
 
@@ -63,7 +64,8 @@ def demo_basic(rank, world_size):
     print(f"Running basic DDP example on rank {rank}.")
     setup(rank, world_size)
 
-    targets = torch.load("targets.pt")
+    targets = torch.multinomial(torch.FloatTensor([0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.5,0.9]), 1000, replacement=True)
+    #targets = torch.load("targets.pt")
     if rank == 0:
         p = calc_prop(targets)
         print("prop=", p)

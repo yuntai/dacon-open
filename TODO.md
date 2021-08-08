@@ -19,6 +19,8 @@ avg max ff [CLS]
 - [o] check distribtedwrapper 
   seems Wrapper w/ WeightedRandom Sampler have problem
 - [ ] check classification report
+- [ ] h transformer
+- works better with no under/over-sampling
 
 ## PLAN
 - seems DistributedSamplerWrapper works fine why unbalnced recall/precision?

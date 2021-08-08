@@ -241,13 +241,13 @@ class LitBaseModel(pl.LightningModule):
     def train_dataloader(self) -> DataLoader:
         from sampler import DynamicBalanceClassSampler, DistributedSamplerWrapper
         ds = self.datasets['train']
-        train_labels = ds.targets.cpu().numpy().tolist()
-        train_sampler = DynamicBalanceClassSampler(train_labels)
+        #train_labels = ds.targets.cpu().numpy().tolist()
+        #train_sampler = DynamicBalanceClassSampler(train_labels, exp_lambda=0.95)
         return DataLoader(
             ds,
             batch_size=self.hparams.batch_size,
-            shuffle=False,
-            sampler=DistributedSamplerWrapper(train_sampler),
+            shuffle=True,
+            #sampler=DistributedSamplerWrapper(train_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -309,12 +309,16 @@ class LitBaseModel(pl.LightningModule):
             mode="max",
             patience=3,
         )
+
+        name = self.trainer.logger.experiment.name
+        logger.log(f"exp {name=}")
         checkpoint = ModelCheckpoint(
-            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
+            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{name}",
             monitor="val_f1",
             save_top_k=3,
             filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
-            mode='max'
+            mode='max',
+            every_n_epochs=1,
         )
         lr_monitor = LearningRateMonitor(logging_interval='step')
 
@@ -323,10 +327,6 @@ class LitBaseModel(pl.LightningModule):
 def train_base_model(args):
     model = LitBaseModel(**args.__dict__)
 
-    wandb_logger = WandbLogger(
-        project=args.project,
-        name=args.name
-    )
     trainer = pl.Trainer(
         gpus=args.gpus,
         amp_level='O2',
@@ -334,8 +334,8 @@ def train_base_model(args):
         accelerator='ddp',
         max_epochs=args.max_epochs,
         checkpoint_callback=False,
-        logger=wandb_logger,
-        replace_sampler_ddp=False,
+        logger=WandbLogger(project=args.project),
+        replace_sampler_ddp=True,
         val_check_interval=0.5,
     )
     trainer.fit(model)

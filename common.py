@@ -72,7 +72,6 @@ def get_default_parser():
 
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open-mlm')
-    parser.add_argument('--name', type=str, default=None)
     return parser
 
 

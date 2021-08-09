@@ -1,9 +1,12 @@
 import os
 import argparse
 import random
+import logging
+import itertools
 import numpy as np
 from typing import Optional
 
+from sklearn.metrics import classification_report
 from numpy.random import default_rng
 import pandas as pd
 
@@ -26,6 +29,9 @@ from common import F1_Loss
 from sampler import DistributedSamplerWrapper
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 class LitMLModel(pl.LightningModule):
     @staticmethod
@@ -85,8 +91,8 @@ class LitMLModel(pl.LightningModule):
         self.loss_fct = nn.CrossEntropyLoss()
 
         self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
-        self.val_precision = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
-        self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
+        self.val_precision = torchmetrics.Precision(num_classes=self.hparams.num_classes, average='macro')
+        self.val_recall = torchmetrics.Recall(num_classes=self.hparams.num_classes, average='macro')
 
     def forward(self, batch):
         return self.__step(batch)
@@ -144,8 +150,10 @@ class LitMLModel(pl.LightningModule):
             mode="max",
             patience=3,
         )
+        exp_name = self.trainer.logger.experiment.name
+        logger.info(f"{exp_name=}")
         checkpoint = ModelCheckpoint(
-            dirpath=f"./res/mlm_base={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}",
+            dirpath=f"./res/mlm_base={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{exp_name}",
             monitor="val_f1",
             save_top_k=3,
             filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
@@ -213,8 +221,8 @@ class OpenDataModule(pl.LightningDataModule):
         return DataLoader(
             self.tr_ds,
             batch_size=self.batch_size,
-            shuffle=False,
-            sampler=DistributedSamplerWrapper(weighted_sampler),
+            shuffle=True,
+            #sampler=DistributedSamplerWrapper(weighted_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -267,10 +275,10 @@ class OpenMLMDataset(torch.utils.data.Dataset):
             else:
                 toks = toks[-ovf:]
 
-        if self.is_training:
-            toks, lm_label = self.random_words(toks)
-        else:
-            lm_label = toks.copy()
+        #if self.is_training:
+        #    toks, lm_label = self.random_words(toks)
+        #else:
+        lm_label = toks.copy()
 
         toks = torch.tensor(toks)
         lm_label = torch.tensor(lm_label)
@@ -358,11 +366,34 @@ def fit():
         precision=16,
         accelerator='ddp',
         max_epochs=args.max_epochs,
-        logger=WandbLogger(project=args.project, name=args.name),
-        replace_sampler_ddp=False,
+        logger=WandbLogger(project=args.project),
+        replace_sampler_ddp=True,
         val_check_interval=0.5,
     )
     trainer.fit(model, dm)
 
-if __name__ == '__main__':
-    fit()
+def predict(ckpt):
+	from common import get_default_parser
+
+	parser = get_default_parser()
+	args = parser.parse_args()
+
+	dm = OpenDataModule(args)
+	model = LitMLModel(args)
+	trainer.predict(model, dm)
+	p = trainer.predict(model, dm.val_dataloader(), ckpt_path=ckpt_path, return_predictions=True)
+	logits, labels = zip(*map(itertools.itemgetter('logits', 'cls_labels'), p))
+    logits = torch.cat(logits).cpu()
+    labels = torch.cat(labels).cpu()
+    preds = logits.argmax(dim=-1)
+    res = classification_report(labels, preds)
+
+	df = pd.DataFrame()
+    for i in range(46):
+        df = df.append(res[str(i)])
+
+    return df
+
+
+#if __name__ == '__main__':
+#    fit()

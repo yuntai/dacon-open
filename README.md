@@ -83,3 +83,6 @@ https://stackoverflow.com/questions/63030692/how-do-i-use-bertformaskedlm-or-ber
 https://neptune.ai/blog/data-augmentation-nlp
 
 # MLM with bert doens't seem to work increase score
+
+# LESSONS
+- loss weight is very efficient and it seems work better than sampling techniques for this problem

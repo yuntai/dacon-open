@@ -1,6 +1,7 @@
 import random
 import logging
 import argparse
+import itertools
 import re
 import argparse
 from pathlib import Path
@@ -339,6 +340,28 @@ def train_base_model(args):
         val_check_interval=0.5,
     )
     trainer.fit(model)
+
+def predict(ckpt_path):
+    assert ckpt_path is not None or name is not None
+    parser = get_parser()
+    args = parser.parse_args()
+
+    model = LitBaseModel(**args.__dict__)
+    trainer = pl.Trainer(
+        gpus=1, amp_level='O2', precision=16, logger=WandbLogger(project=args.project)
+    )
+    p = trainer.predict(model, model.val_dataloader(), return_predictions=True, ckpt_path=ckpt_path)
+    logits, labels = zip(*map(itertools.itemgetter('logits', 'cls_labels'), p))
+    logits = torch.cat(logits).cpu()
+    labels = torch.cat(labels).cpu()
+    preds = logits.argmax(dim=-1)
+    res = classification_report(labels, preds)
+
+    df = pd.DataFrame()
+    for i in range(46):
+        df = df.append(res[str(i)])
+
+    return df
 
 if __name__ == '__main__' and not common.isin_ipython():
     parser = get_parser()

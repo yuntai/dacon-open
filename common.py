@@ -8,6 +8,8 @@ from torch.utils.data import Dataset
 import re
 import torch
 import torch.nn.functional as F
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
 
 #TOK_COLS = ['input_ids', 'token_type_ids', 'attention_mask']
 TOK_COLS = ['input_ids', 'attention_mask']
@@ -59,7 +61,7 @@ def get_default_parser():
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
-    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
+    parser.add_argument('--learning_rate', default=2e-5, type=float, help='The initial learning rate for Adam.')
     parser.add_argument('--base_model', type=str, default='xlm-roberta-base')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="./datasets")
@@ -111,7 +113,13 @@ def clean_text(s):
     s = re.sub("(\\W)+"," ", s)
     return s.strip()
 
-def get_weights(df, col='label'):
+def get_class_weights(df, col='label'):
+    w = df.groupby(col)[col].count()
+    print(w)
+    w = w.sum()/w
+    return w.values.tolist()
+
+def get_sample_weights(df, col='label'):
     w = df.groupby(col)[col].count()
     w = w.sum()/w
     w.name = 'w'
@@ -122,7 +130,6 @@ def get_weights(df, col='label'):
 def cv_split(df, cv):
     tr_df = df.loc[df.cv!=cv]
     va_df = df.loc[df.cv==cv]
-
     return tr_df, va_df
 
 def prep_txt(df, include_keywords=True, include_english=True, is_test=False):
@@ -147,9 +154,16 @@ def prep_txt(df, include_keywords=True, include_english=True, is_test=False):
 
     return df
 
+def prep_cv_strified(df, cv_size=5, seed=42):
+    skf = StratifiedKFold(n_splits=cv_size,shuffle=True,random_state=seed)
+    for ix, (train_index, test_index) in enumerate(skf.split(np.zeros(len(df.label)), df.label)):
+        df.loc[test_index, 'cv'] = ix
+    df['cv'] = df.cv.astype(int)
+    return df
+
 # split train data to 5 set
 def prep_cv(df, cv_size=5, seed=42):
-    indices = list(df.index)
+    indices = list(df.inde)
     random.Random(seed).shuffle(indices)
     sz = df.shape[0]//cv_size
     for ix in range(cv_size-1):

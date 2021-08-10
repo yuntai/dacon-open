@@ -13,20 +13,40 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import Dataset, DataLoader
 import torchmetrics
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
+from transformers.optimization import get_linear_schedule_with_warmup
 
 import pytorch_lightning as pl
 
-from transformers import BertForMaskedLM, AutoTokenizer, AdamW, AutoModel
-from torch.utils.data.sampler import WeightedRandomSampler
+from transformers import AutoTokenizer, AdamW, AutoModel
 
-from common import F1_Loss
 from sampler import DistributedSamplerWrapper
+
+def get_default_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--max_epochs', type=int, default=60)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--gpus', type=int, default=2)
+    parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
+    parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
+    parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
+    parser.add_argument('--base_model', type=str, default='xlm-roberta-base')
+    parser.add_argument('--cache_dir', type=str, default="./.cache")
+    parser.add_argument('--dataroot', type=str, default="./datasets")
+    parser.add_argument('--cv_size', type=int, default=5)
+    parser.add_argument('--cv', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--num_classes', type=int, default=46)
+    parser.add_argument('--max_seq_len', type=int, default=256)
+    parser.add_argument('--warmup_steps', type=int, default=300)
+
+    # wandb related
+    parser.add_argument('--project', type=str, default='dacon-open-mlm')
+    return parser
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
@@ -74,7 +94,7 @@ class LitMLModel(pl.LightningModule):
 
         return df
 
-    def __init__(self, args):
+    def __init__(self, args, class_weight=None):
         super().__init__()
         self.save_hyperparameters(args)
         self.model = AutoModel.from_pretrained(self.hparams.base_model, cache_dir=self.hparams.cache_dir)
@@ -88,7 +108,7 @@ class LitMLModel(pl.LightningModule):
         self.classifier.bias.data.zero_()
 
         #self.loss_fct = F1_Loss(args.num_classes)
-        self.loss_fct = nn.CrossEntropyLoss()
+        self.loss_fct = nn.CrossEntropyLoss(weight=class_weight)
 
         self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
         self.val_precision = torchmetrics.Precision(num_classes=self.hparams.num_classes, average='macro')
@@ -148,7 +168,7 @@ class LitMLModel(pl.LightningModule):
             monitor="val_f1",
             min_delta=0.00,
             mode="max",
-            patience=3,
+            patience=5,
         )
         exp_name = self.trainer.logger.experiment.name
         logger.info(f"{exp_name=}")
@@ -179,13 +199,7 @@ class LitMLModel(pl.LightningModule):
         num_training_steps = num_batches * self.hparams.max_epochs
         num_warmup_steps = self.hparams.warmup_steps
 
-        def lr_lambda(current_step: int):
-            if current_step < num_warmup_steps:
-                return float(current_step) / float(max(1, num_warmup_steps))
-            return max(
-                0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps))
-            )
-        lr_scheduler = LambdaLR(optimizer, lr_lambda, -1)
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
         return [optimizer], [{"scheduler": lr_scheduler, "interval": "step"}]
 
 
@@ -203,26 +217,33 @@ class OpenDataModule(pl.LightningDataModule):
         with_cache(prep_txt, self.prep_cache_path)(tokenizer)
 
     def setup(self, stage: Optional[str] = None):
-        from common import with_cache, get_weights
+        from common import with_cache, get_class_weights, cv_split
         tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
         df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
 
-        tr_df = df[df.cv != 0]
-        va_df = df[df.cv == 0]
+        tr_df, va_df = cv_split(df, args.cv)
 
-        tr_df, weights = get_weights(tr_df)
+        weights = get_class_weights(tr_df)
         self.weights = weights
 
-        self.tr_ds = OpenMLMDataset(tr_df, tokenizer)
-        self.va_ds = OpenMLMDataset(va_df, tokenizer, is_training=False)
+        self.tr_ds = OpenMLMDataset(tr_df, tokenizer, self.args.max_seq_len)
+        self.va_ds = OpenMLMDataset(va_df, tokenizer, self.args.max_seq_len, is_training=False)
 
     def train_dataloader(self):
-        weighted_sampler = WeightedRandomSampler(self.weights, len(self.weights))
+        from sampler import (
+            DynamicBalanceClassSampler,
+            DistributedSamplerWrapper
+        )
+
+        #train_labels = self.tr_ds.df['label'].values.tolist()
+        #sampler = DynamicBalanceClassSampler(train_labels, exp_lambda=0.98)
+
         return DataLoader(
             self.tr_ds,
             batch_size=self.batch_size,
             shuffle=True,
-            #sampler=DistributedSamplerWrapper(weighted_sampler),
+            #sampler=DistributedSamplerWrapper(sampler),
+            drop_last=True,
             pin_memory=True,
             num_workers=16)
 
@@ -238,7 +259,7 @@ class OpenDataModule(pl.LightningDataModule):
     #    return DataLoader(self.ds, batch_size=self.hparams.batch_size)
 
 class OpenMLMDataset(torch.utils.data.Dataset):
-    def __init__(self, df, tokenizer, max_seq_len=256, add_speical_tok=False, seed=42, is_training=True):
+    def __init__(self, df, tokenizer, max_seq_len, add_speical_tok=False, seed=42, is_training=True):
         super().__init__()
         self.df = df.copy()
         self.max_seq_len = max_seq_len
@@ -301,12 +322,16 @@ class OpenMLMDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.df.shape[0]
 
+def clean_text(s):
+    s = re.sub("(\\W)+"," ", s)
+    return s.strip()
+
 def prep_txt(tokenizer):
     from tqdm.auto import tqdm
-    from common import prep_cv, clean_text
+    from common import prep_cv_strified, clean_text
 
     df = pd.read_csv("/mnt/datasets/open/train.csv")
-    df = prep_cv(df)
+    df = prep_cv_strified(df)
 
     kwargs = {
         'add_special_tokens': False,
@@ -352,8 +377,6 @@ def validate(ckpt):
     trainer.validate(model, dm)
 
 def fit():
-    from common import get_default_parser
-
     parser = get_default_parser()
     args = parser.parse_args()
 
@@ -373,27 +396,23 @@ def fit():
     trainer.fit(model, dm)
 
 def predict(ckpt):
-	from common import get_default_parser
-
-	parser = get_default_parser()
-	args = parser.parse_args()
-
-	dm = OpenDataModule(args)
-	model = LitMLModel(args)
-	trainer.predict(model, dm)
-	p = trainer.predict(model, dm.val_dataloader(), ckpt_path=ckpt_path, return_predictions=True)
-	logits, labels = zip(*map(itertools.itemgetter('logits', 'cls_labels'), p))
+    model = LitMLModel.load_from_checkpoint(ckpt)
+    dm = OpenDataModule(args)
+    w = torch.FloatTensor(dm.weights)
+    model = LitMLModel(args, weights=w)
+    trainer.predict(model, dm)
+    p = trainer.predict(model, dm.val_dataloader(), ckpt_path=ckpt_path, return_predictions=True)
+    logits, labels = zip(*map(itertools.itemgetter('logits', 'cls_labels'), p))
     logits = torch.cat(logits).cpu()
     labels = torch.cat(labels).cpu()
     preds = logits.argmax(dim=-1)
     res = classification_report(labels, preds)
 
-	df = pd.DataFrame()
+    df = pd.DataFrame()
     for i in range(46):
         df = df.append(res[str(i)])
 
     return df
 
-
-#if __name__ == '__main__':
-#    fit()
+if __name__ == '__main__':
+    fit()

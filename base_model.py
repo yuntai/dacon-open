@@ -311,10 +311,10 @@ class LitBaseModel(pl.LightningModule):
             patience=3,
         )
 
-        name = self.trainer.logger.experiment.name
-        logger.info(f"exp {name=}")
+        exp_name = self.trainer.logger.experiment.name
+        logger.info(f"{exp_name=}")
         checkpoint = ModelCheckpoint(
-            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{name}",
+            dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{exp_name}",
             monitor="val_f1",
             save_top_k=3,
             filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',

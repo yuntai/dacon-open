@@ -1,16 +1,22 @@
 - xlm & keywords defnitely helpful [o]
 - clean text seems helpful [o]
-- avg & max & ff pooling & [CLS] pooling
+- avg & max & ff pooling & [CLS] pooling [o]
 - more cleaning text?
 - shorten max_len_seq (seems overfitting)
-
 - pooling sweep
-avg max ff [CLS]
-             o
-        o
- o   
- o   o  o
-     o  o 
+
+AUG 10
+claend dataset
+AUG 11
+SMOTE
+AUG 12
+LSTM/TRANSFORMER(?)
+AUG 13
+TRAIN WHOLE DATA
+AUG 14
+LB 
+AUG 15
+AUG 16
 
 #### (A) check blanced batch/trimming
 - [o] check MolBert (%collate_fn)
@@ -19,14 +25,14 @@ avg max ff [CLS]
       try BalanceClassSampler (should be not much different from weightedsampling)
       try DynamicBalanceClas
   seems Wrapper w/ WeightedRandom Sampler have problem
-- [ ] check classification report
+- [o] check classification report
 -     recall/precision imbalance problem!
 - imablance dataset prpaers
-  - curriculum learning
+  - curriculum learning [?]
 https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%221bakX6mLeutpEDVDHi_M2zuqZ7OYG3yJl%22%5D%2C%22action%22%3A%22open%22%2C%22userId%22%3A%22108577906332508460772%22%2C%22resourceKeys%22%3A%7B%7D%7D&kami_user_id=5164017
 - dynamic curriculum learning
 https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%2218Uer9efFKPzvr5Sr5DDdWDY1q6El37F9%22%5D%2C%22action%22%3A%22open%22%2C%22userId%22%3A%22108577906332508460772%22%2C%22resourceKeys%22%3A%7B%7D%7D&kami_user_id=5164017
-- [ ] h transformer
+- [x] h transformer
 - works better with no under/over-sampling
 
 ## PLAN
@@ -36,10 +42,15 @@ https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%2218Uer9efFKPzvr
   - https://arxiv.org/pdf/1901.06783.pdf
 - seems DistributedSamplerWrapper works fine why unbalnced recall/precision?
 - balance batching [o]
+
 - comparision MLM / normal
-- additional cleaning text
+- additional cleaning text [x]
 - LSTM classification
 - training with whole data
+- try weighted loss []
+- clean text
+  check duplicate rows, etc []
+
 
 ##### hiearchical?
 

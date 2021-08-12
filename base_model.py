@@ -2,6 +2,7 @@ import random
 import logging
 import argparse
 import itertools
+import operator
 import re
 import argparse
 from pathlib import Path
@@ -19,12 +20,9 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from sklearn.metrics import classification_report
 
-
 from pytorch_lightning.loggers import WandbLogger
 
-#from transformers import BertForSequenceClassification
 from transformers import EarlyStoppingCallback
-from torch.utils.data.sampler import WeightedRandomSampler
 from torch.nn import CrossEntropyLoss
 from transformers import get_scheduler, AutoModel
 from transformers import AdamW
@@ -127,11 +125,12 @@ class LitBaseModel(pl.LightningModule):
     def extract_feature(ckpt_path, test_cache_path=None):
         from common import prep, cv_split, with_cache
         is_test = test_cache_path is not None
-        m, args = LitBaseModel.load_from_ckpt(ckpt_path)
+        m = LitBaseModel.load_from_checkpoint(ckpt_path)
+        args = m.hparams
         m.eval().cuda().freeze()
 
         if test_cache_path is None:
-            df = with_cache(prep, m.cache_path)(args)
+            df = with_cache(prep, m.hparams.cache_path)(args)
         else:
             __prep = functools.partial(prep, is_test=True)
             df = with_cache(__prep, test_cache_path)(args)
@@ -139,6 +138,7 @@ class LitBaseModel(pl.LightningModule):
         ds = get_dataset(df, is_test=is_test)
         dl = DataLoader(ds, batch_size=128, shuffle=False)
 
+        logging.info("extracting feature...")
         hidden_states = []
         with torch.no_grad():
             for batch in tqdm(dl):
@@ -201,6 +201,7 @@ class LitBaseModel(pl.LightningModule):
 
         __kwargs = {'num_classes': self.hparams.num_classes, 'average':'macro'}
 
+        self.loss_fct = None
         self.val_f1 = torchmetrics.F1(**__kwargs)
         self.val_acc = torchmetrics.Accuracy(**__kwargs)
         self.val_recall = torchmetrics.Recall(**__kwargs)
@@ -209,14 +210,20 @@ class LitBaseModel(pl.LightningModule):
         self._datasets = None
 
     def forward(self, batch):
+        labels = None
         if 'labels' in batch:
-            _ = batch.pop("labels")
-        return self.base_model(**batch)
+            labels = batch.pop("labels")
+        out = self.base_model(**batch)
+
+        if labels is not None:
+            out["labels"] = labels
+
+        return out
 
     def validation_step(self, batch, batch_idx):
         labels = batch.pop("labels")
         logits = self.base_model(**batch)['logits']
-        loss = F.cross_entropy(logits, labels)
+        loss = self.loss_fct(logits, labels)
         preds = logits.argmax(dim=1)
 
         self.val_acc(preds, labels)
@@ -234,19 +241,14 @@ class LitBaseModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         labels = batch.pop("labels")
         logits = self.base_model(**batch)['logits']
-        loss = F.cross_entropy(logits, labels)
+        loss = self.loss_fct(logits, labels)
         return loss
 
     def train_dataloader(self) -> DataLoader:
-        from sampler import DynamicBalanceClassSampler, DistributedSamplerWrapper
-        ds = self.datasets['train']
-        #train_labels = ds.targets.cpu().numpy().tolist()
-        #train_sampler = DynamicBalanceClassSampler(train_labels, exp_lambda=0.95)
         return DataLoader(
-            ds,
+            self.datasets['train'],
             batch_size=self.hparams.batch_size,
             shuffle=True,
-            #sampler=DistributedSamplerWrapper(train_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -255,22 +257,22 @@ class LitBaseModel(pl.LightningModule):
 
     @property
     def datasets(self):
-        if self._datasets:
-            return self._datasets
+        return self._datasets
 
-        from common import prep, cv_split, get_weights, with_cache
+    def setup(self, stage: Optional[str] = None):
+        from common import prep, cv_split, get_class_weights, with_cache
 
         df = with_cache(prep, self.hparams.cache_path)(self.hparams)
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
-        tr_df, weights = get_weights(tr_df)
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
 
-        self._datasets = {'train': tr_ds, 'val': va_ds, 'weights': weights}
+        self._datasets = {'train': tr_ds, 'val': va_ds}
+        weight = get_class_weights(tr_df)
 
-        return self._datasets
+        self.loss_fct = nn.CrossEntropyLoss(weight=weight)
 
     def prepare_data(self):
         from common import prep, with_cache
@@ -308,7 +310,7 @@ class LitBaseModel(pl.LightningModule):
             monitor="val_f1",
             min_delta=0.00,
             mode="max",
-            patience=3,
+            patience=4,
         )
 
         exp_name = self.trainer.logger.experiment.name
@@ -346,20 +348,20 @@ def predict(ckpt_path):
     parser = get_parser()
     args = parser.parse_args()
 
-    model = LitBaseModel(**args.__dict__)
+    model = LitBaseModel.load_from_checkpoint(ckpt_path)
     trainer = pl.Trainer(
         gpus=1, amp_level='O2', precision=16, logger=WandbLogger(project=args.project)
     )
-    p = trainer.predict(model, model.val_dataloader(), return_predictions=True, ckpt_path=ckpt_path)
-    logits, labels = zip(*map(itertools.itemgetter('logits', 'cls_labels'), p))
+    p = trainer.predict(dataloaders=model.val_dataloader(), return_predictions=True)
+    logits, labels = zip(*map(operator.itemgetter('logits', 'labels'), p))
     logits = torch.cat(logits).cpu()
     labels = torch.cat(labels).cpu()
     preds = logits.argmax(dim=-1)
-    res = classification_report(labels, preds)
+    res = classification_report(labels, preds, output_dict=True)
 
     df = pd.DataFrame()
     for i in range(46):
-        df = df.append(res[str(i)])
+        df = df.append(res[str(i)], ignore_index=True)
 
     return df
 

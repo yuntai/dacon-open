@@ -26,7 +26,7 @@ import torchmetrics
 from sklearn.metrics import classification_report
 from sklearn.model_selection import StratifiedKFold
 
-from transformers import AutoModel, AdamW, EarlyStoppingCallback
+from transformers import AutoModel, AdamW, EarlyStoppingCallback, AutoTokenizer
 from transformers.optimization import get_linear_schedule_with_warmup
 
 def isin_ipython():
@@ -100,7 +100,16 @@ def prep_tok(df, tokenizer, add_special_tokens=False):
 
     return df
 
+def prep_cv_strat(df, cv_size=5, seed=42):
+    df['cv'] = -1
+    skf = StratifiedKFold(n_splits=cv_size, shuffle=True, random_state=seed)
+    for _cv, (_, test_index) in enumerate(skf.split(np.zeros(len(df.label)), df.label)):
+        df.iloc[test_index, df.columns.get_loc('cv')] = _cv
+    df['cv'] = df.cv.astype(int)
+    return df
+
 def prep_txt(df, include_keywords=True, is_test=False):
+    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
     if include_keywords:
         cols += ['요약문_한글키워드', '요약문_영문키워드']
 
@@ -123,9 +132,9 @@ def prep(args, is_test=False):
     df = pd.read_csv(args.dataroot/fn)
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, cache_dir=args.cache_dir, do_lower_case=False)
 
-    df = prep_txt(df, args.use_keywords, args.use_english, is_test=is_test)
+    df = prep_txt(df, args.use_keywords, is_test=is_test)
     if not is_test:
-        df = prep_cv_start(df, cv_size=args.cv_size, seed=args.seed)
+        df = prep_cv_strat(df, cv_size=args.cv_size, seed=args.seed)
     df = prep_explode(df, args.max_seq_len, is_test=is_test)
     df = prep_tok(df, tokenizer)
     return df
@@ -147,10 +156,6 @@ def cv_split(df, cv):
     tr_df = df.loc[df.cv!=cv]
     va_df = df.loc[df.cv==cv]
     return tr_df, va_df
-
-class pathAction(argparse.Action):
-    def __call__(self, parser, args, values, option_string=None):
-        setattr(args, self.dest, Path(values))
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -190,8 +195,9 @@ def get_parser():
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--warmup_steps', type=int, default=300)
 
-    parser.add_argument('--num_classes', type=int, default=46)
+    #parser.add_argument('--num_classes', type=int, default=46)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
@@ -199,14 +205,11 @@ def get_parser():
     MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
     parser.add_argument('--base_model', choices=MODELS, default='xlm-roberta-base')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
-    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open", action=pathAction)
+    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
 
     parser.add_argument('--use_keywords', dest='use_keywords', action='store_true')
     parser.add_argument('--no_use_keywords', dest='use_keywords', action='store_false')
     parser.set_defaults(use_keywords=True)
-    parser.add_argument('--use_english', dest='use_english', action='store_true')
-    parser.add_argument('--no_use_english', dest='use_english', action='store_false')
-    parser.set_defaults(use_english=True)
 
     parser.add_argument('--cv_size', type=int, default=5)
 
@@ -308,7 +311,7 @@ class LitBaseModel(pl.LightningModule):
     def __init__(self, **kwargs):
         super().__init__()
         if 'cache_path' not in kwargs:
-            tmpl = './prep/seed={seed}&max_seq_len={max_seq_len}&base_model={base_model}&use_keywords={use_keywords}&use_english={use_english}.pkl'
+            tmpl = './prep/seed={seed}&max_seq_len={max_seq_len}&base_model={base_model}&use_keywords={use_keywords}.pkl'
             kwargs['cache_path'] = tmpl.format(**kwargs)
 
         self.save_hyperparameters(kwargs)
@@ -381,8 +384,8 @@ class LitBaseModel(pl.LightningModule):
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        assert tr_df.label.unique().tolist() == list(range(46))
-        assert va_df.label.unique().tolist() == list(range(46))
+        assert sorted(tr_df.label.unique().tolist()) == list(range(46))
+        assert sorted(va_df.label.unique().tolist()) == list(range(46))
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
@@ -478,8 +481,9 @@ def predict(ckpt_path):
 if __name__ == '__main__' and not isin_ipython():
     parser = get_parser()
     args = parser.parse_args()
+    args.dataroot = Path(args.dataroot)
+    args.num_classes = 46
 
     pl.seed_everything(args.seed)
 
     train_base_model(args)
-

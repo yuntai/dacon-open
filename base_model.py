@@ -1,38 +1,156 @@
 import random
 import logging
-import argparse
 import itertools
 import operator
 import re
-import argparse
-from pathlib import Path
 import os
-
-import torch
-import torch.nn as nn
+import argparse
+import functools
+from pathlib import Path
+from typing import Optional
+from tqdm.auto import tqdm
 
 import pandas as pd
 import numpy as np
 
-import torchmetrics
+import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+
+import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from sklearn.metrics import classification_report
-
 from pytorch_lightning.loggers import WandbLogger
+import torchmetrics
 
-from transformers import EarlyStoppingCallback
-from torch.nn import CrossEntropyLoss
-from transformers import get_scheduler, AutoModel
-from transformers import AdamW
-from tqdm.auto import tqdm
-import pytorch_lightning as pl
-import torch.nn.functional as F
-from torch.optim.lr_scheduler import ReduceLROnPlateau, LambdaLR
-import functools
+from sklearn.metrics import classification_report
+from sklearn.model_selection import StratifiedKFold
 
-import common
+from transformers import AutoModel, AdamW, EarlyStoppingCallback
+from transformers.optimization import get_linear_schedule_with_warmup
+
+def isin_ipython():
+    try:
+        return get_ipython().__class__.__name__ == 'TerminalInteractiveShell'
+    except NameError:
+        return False
+
+def with_cache(func, cache_path):
+    def __inner(*args, **kwargs):
+        if Path(cache_path).exists():
+            print(f"CACHE FOUND {cache_path}")
+            df = pd.read_pickle(cache_path)
+        else:
+            print(f"CACHE NOT FOUND {cache_path}")
+            df = func(*args, **kwargs)
+            print(f"saving to {cache_path} ...")
+            df.to_pickle(cache_path)
+        return df
+    return __inner
+
+def clean_text(s):
+    s = re.sub("(\\W)+"," ", s)
+    return s.strip()
+
+def get_split(text1, chunk_size=250, overlap_pct=0.25):
+    words = text1.split()
+    overlap_sz = int(overlap_pct * chunk_size)
+
+    step_size = chunk_size - overlap_sz
+
+    res = [words[:chunk_size]]
+    if len(words) > chunk_size:
+        res += [words[i:i+chunk_size] for i in range(step_size, len(words), step_size)]
+
+    return list(map(lambda x: " ".join(x), res))
+
+def prep_explode(df, max_seq_len, is_test=False):
+    __get_split = functools.partial(get_split, chunk_size=max_seq_len)
+    df['data_split'] = df['data_cleaned'].apply(__get_split)
+
+    train_l, label_l, cv_l, index_l, subix_l = [], [], [], [], []
+
+    for _, row in df.iterrows():
+      for ix, l in enumerate(row['data_split']):
+          train_l.append(l)
+          if not is_test:
+            label_l.append(row['label'])
+            cv_l.append(row['cv'])
+          index_l.append(row['index'])
+          subix_l.append(ix)
+
+    data = {'index': index_l, 'subix': subix_l, 'data': train_l}
+    if not is_test:
+        data['label'] = label_l
+        data['cv'] = cv_l
+    return pd.DataFrame(data)
+
+def prep_tok(df, tokenizer, add_special_tokens=False):
+    TOK_COLS = ['input_ids', 'attention_mask']
+    kwargs = {
+        'add_special_tokens': add_special_tokens,
+        'padding': True,
+        'return_attention_mask': True,
+        'truncation': True
+    }
+    toks = tokenizer(df['data'].values.tolist(), **kwargs)
+    for k in TOK_COLS:
+        if k in toks:
+            df[k] = toks[k]
+
+    return df
+
+def prep_txt(df, include_keywords=True, is_test=False):
+    if include_keywords:
+        cols += ['요약문_한글키워드', '요약문_영문키워드']
+
+    if is_test:
+        df = df[cols + ['index']].copy()
+    else:
+        df = df[cols + ['index', 'label']].copy()
+    df.fillna(' ', inplace=True)
+
+    df['data'] = df[cols[0]]
+    for c in cols[1:]:
+        df['data'] += ' ' + df[c]
+
+    df['data_cleaned'] = df['data'].apply(clean_text)
+
+    return df
+
+def prep(args, is_test=False):
+    fn = 'test.csv' if is_test else 'train.csv'
+    df = pd.read_csv(args.dataroot/fn)
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, cache_dir=args.cache_dir, do_lower_case=False)
+
+    df = prep_txt(df, args.use_keywords, args.use_english, is_test=is_test)
+    if not is_test:
+        df = prep_cv_start(df, cv_size=args.cv_size, seed=args.seed)
+    df = prep_explode(df, args.max_seq_len, is_test=is_test)
+    df = prep_tok(df, tokenizer)
+    return df
+
+def prep_cv_strat(df, cv_size=5, seed=42):
+    df['cv'] = -1
+    skf = StratifiedKFold(n_splits=cv_size, shuffle=True, random_state=seed)
+    for _cv, (_, test_index) in enumerate(skf.split(np.zeros(len(df.label)), df.label)):
+        df.iloc[test_index, df.columns.get_loc('cv')] = _cv
+    df['cv'] = df.cv.astype(int)
+    return df
+
+def get_class_weights(df, col='label'):
+    w = df.groupby(col)[col].count()
+    w = w.sum()/w
+    return w.values.tolist()
+
+def cv_split(df, cv):
+    tr_df = df.loc[df.cv!=cv]
+    va_df = df.loc[df.cv==cv]
+    return tr_df, va_df
+
+class pathAction(argparse.Action):
+    def __call__(self, parser, args, values, option_string=None):
+        setattr(args, self.dest, Path(values))
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -81,7 +199,7 @@ def get_parser():
     MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
     parser.add_argument('--base_model', choices=MODELS, default='xlm-roberta-base')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
-    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
+    parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open", action=pathAction)
 
     parser.add_argument('--use_keywords', dest='use_keywords', action='store_true')
     parser.add_argument('--no_use_keywords', dest='use_keywords', action='store_false')
@@ -123,7 +241,6 @@ class BaseClassifier(nn.Module):
 class LitBaseModel(pl.LightningModule):
     @staticmethod
     def extract_feature(ckpt_path, test_cache_path=None):
-        from common import prep, cv_split, with_cache
         is_test = test_cache_path is not None
         m = LitBaseModel.load_from_checkpoint(ckpt_path)
         args = m.hparams
@@ -166,12 +283,11 @@ class LitBaseModel(pl.LightningModule):
 
     @staticmethod
     def eval_from_ckpt(ckpt_path):
-        from common import prep, cv_split, with_cache
         m = LitBaseModel.load_from_checkpoint(ckpt_path)
         m.eval().cuda().freeze()
 
         # TODO: w/ trainer
-        df = with_cache(prep, m.hparams.cache_path)(args)
+        df = with_cache(prep, m.hparams.cache_path)(m.hparams)
         _, va_df = cv_split(df, m.hparams.cv)
         va_ds = get_dataset(va_df)
         va_loader = DataLoader(va_ds, batch_size=64, shuffle=False)
@@ -257,14 +373,16 @@ class LitBaseModel(pl.LightningModule):
 
     @property
     def datasets(self):
+        assert self._datasets is not None
         return self._datasets
 
     def setup(self, stage: Optional[str] = None):
-        from common import prep, cv_split, get_class_weights, with_cache
-
         df = with_cache(prep, self.hparams.cache_path)(self.hparams)
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
+
+        assert tr_df.label.unique().tolist() == list(range(46))
+        assert va_df.label.unique().tolist() == list(range(46))
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
@@ -272,10 +390,9 @@ class LitBaseModel(pl.LightningModule):
         self._datasets = {'train': tr_ds, 'val': va_ds}
         weight = get_class_weights(tr_df)
 
-        self.loss_fct = nn.CrossEntropyLoss(weight=weight)
+        self.loss_fct = nn.CrossEntropyLoss(weight=torch.FloatTensor(weight))
 
     def prepare_data(self):
-        from common import prep, with_cache
         with_cache(prep, self.hparams.cache_path)(self.hparams)
 
     def configure_optimizers(self):
@@ -292,17 +409,9 @@ class LitBaseModel(pl.LightningModule):
 
         num_batches = len(self.datasets['train']) // self.hparams.batch_size
         num_training_steps = num_batches * self.hparams.max_epochs
-        num_warmup_steps = 0
+        num_warmup_steps = self.hparams.warmup_steps
 
-        def lr_lambda(current_step: int):
-            if current_step < num_warmup_steps:
-                return float(current_step) / float(max(1, num_warmup_steps))
-            return max(
-                0.0,
-                float(num_training_steps-current_step) / float(max(1, num_training_steps-num_warmup_steps))
-            )
-
-        lr_scheduler = LambdaLR(optimizer, lr_lambda, -1)
+        lr_scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps)
         return [optimizer], [{"scheduler": lr_scheduler, "interval": "step"}]
 
     def configure_callbacks(self):
@@ -345,13 +454,10 @@ def train_base_model(args):
 
 def predict(ckpt_path):
     assert ckpt_path is not None or name is not None
-    parser = get_parser()
-    args = parser.parse_args()
 
     model = LitBaseModel.load_from_checkpoint(ckpt_path)
-    trainer = pl.Trainer(
-        gpus=1, amp_level='O2', precision=16, logger=WandbLogger(project=args.project)
-    )
+    trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
+
     p = trainer.predict(dataloaders=model.val_dataloader(), return_predictions=True)
     logits, labels = zip(*map(operator.itemgetter('logits', 'labels'), p))
     logits = torch.cat(logits).cpu()
@@ -363,12 +469,15 @@ def predict(ckpt_path):
     for i in range(46):
         df = df.append(res[str(i)], ignore_index=True)
 
-    return df
+    return {
+        'report': df,
+        'logits': logits,
+        'labels': labels
+    }
 
-if __name__ == '__main__' and not common.isin_ipython():
+if __name__ == '__main__' and not isin_ipython():
     parser = get_parser()
     args = parser.parse_args()
-    args.dataroot = Path(args.dataroot)
 
     pl.seed_everything(args.seed)
 

@@ -191,18 +191,18 @@ def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_seq_len', type=int, default=250)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=40)
+    parser.add_argument('--max_epochs', type=int, default=25)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--warmup_steps', type=int, default=300)
+    parser.add_argument('--warmup_steps', type=int, default=600)
 
     #parser.add_argument('--num_classes', type=int, default=46)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'monologg/kobert', 'monologg/distilkobert']
+    MODELS = ['bert-base-multilingual-cased', 'xlm-roberta-base']
     parser.add_argument('--base_model', choices=MODELS, default='xlm-roberta-base')
     parser.add_argument('--cache_dir', type=str, default="./.cache")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
@@ -224,16 +224,19 @@ class BaseClassifier(nn.Module):
         self.m = AutoModel.from_pretrained(args.base_model, cache_dir=args.cache_dir)
         config = self.m.config
 
-        self.activation = nn.Tanh()
+        self.activation = nn.ReLU()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
+        self.classifier = nn.Linear(config.hidden_size*2, args.num_classes)
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
 
     def forward(self, input_ids=None, token_type_ids=None, attention_mask=None):
         output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-        hidden = output['last_hidden_state'].mean(axis=1)
+        hidden0 = output['last_hidden_state'].mean(dim=1)
+        hidden1 = output['last_hidden_state'].max(dim=1)[0]
+        hidden = torch.cat([hidden0, hidden1], dim=-1)
+
         x = self.activation(hidden)
         x = self.dropout(x)
 
@@ -321,6 +324,7 @@ class LitBaseModel(pl.LightningModule):
         __kwargs = {'num_classes': self.hparams.num_classes, 'average':'macro'}
 
         self.loss_fct = None
+        self.use_class_weight = False
         self.val_f1 = torchmetrics.F1(**__kwargs)
         self.val_acc = torchmetrics.Accuracy(**__kwargs)
         self.val_recall = torchmetrics.Recall(**__kwargs)
@@ -393,7 +397,10 @@ class LitBaseModel(pl.LightningModule):
         self._datasets = {'train': tr_ds, 'val': va_ds}
         weight = get_class_weights(tr_df)
 
-        self.loss_fct = nn.CrossEntropyLoss(weight=torch.FloatTensor(weight))
+        if self.use_class_weight:
+            self.loss_fct = nn.CrossEntropyLoss(weight=torch.FloatTensor(weight))
+        else:
+            self.loss_fct = nn.CrossEntropyLoss()
 
     def prepare_data(self):
         with_cache(prep, self.hparams.cache_path)(self.hparams)

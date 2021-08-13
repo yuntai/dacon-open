@@ -43,13 +43,16 @@ https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%2218Uer9efFKPzvr
 - seems DistributedSamplerWrapper works fine why unbalnced recall/precision?
 - balance batching [o]
 
-- comparision MLM / normal
+- comparision MLM / normal [o]
+  MLM no help
 - additional cleaning text [x]
+- try weighted loss [o]
+- clean text [x] - doesn't seem helpful much
+  check duplicate rows, etc [x]
 - LSTM classification
+- LSTM classification with additional info (project name)
+- hiearchical?
 - training with whole data
-- try weighted loss []
-- clean text
-  check duplicate rows, etc []
 
 
 ##### hiearchical?

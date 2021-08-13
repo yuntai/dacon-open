@@ -19,6 +19,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
 from transformers.optimization import get_linear_schedule_with_warmup
+from transformers import RobertaForMaskedLM
 
 import pytorch_lightning as pl
 
@@ -29,7 +30,7 @@ from sampler import DistributedSamplerWrapper
 def get_default_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_epochs', type=int, default=60)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
@@ -97,7 +98,7 @@ class LitMLModel(pl.LightningModule):
     def __init__(self, args, class_weight=None):
         super().__init__()
         self.save_hyperparameters(args)
-        self.model = AutoModel.from_pretrained(self.hparams.base_model, cache_dir=self.hparams.cache_dir)
+        self.model = RobertaForMaskedLM.from_pretrained(self.hparams.base_model, cache_dir=self.hparams.cache_dir)
 
         config = self.model.config
         self.activation = torch.nn.ReLU()
@@ -113,16 +114,15 @@ class LitMLModel(pl.LightningModule):
         self.val_f1 = torchmetrics.F1(num_classes=self.hparams.num_classes, average='macro')
         self.val_precision = torchmetrics.Precision(num_classes=self.hparams.num_classes, average='macro')
         self.val_recall = torchmetrics.Recall(num_classes=self.hparams.num_classes, average='macro')
+        self.do_lm_loss = False
 
     def forward(self, batch):
         return self.__step(batch)
 
     def __step(self, batch):
         cls_labels = batch.pop('cls_labels')
-        labels = batch.pop('labels')
         out = self.model(**batch, output_hidden_states=True)
-        #lm_loss = out['loss']
-        last_hidden_state = out['last_hidden_state']
+        last_hidden_state = out['hidden_states'][-1]
 
         pooled_hidden_state1 = last_hidden_state.mean(dim=1)
         pooled_hidden_state2 = last_hidden_state.max(dim=1)[0]
@@ -131,37 +131,40 @@ class LitMLModel(pl.LightningModule):
         x = self.activation(pooled_hidden_state)
         x = self.dropout(x)
         logits = self.classifier(x)
-        #cls_loss = F.cross_entropy(logits, cls_labels)
         cls_loss = self.loss_fct(logits, cls_labels)
-        return {
-            #'lm_loss': lm_loss,
+
+        ret =  {
             'cls_loss': cls_loss,
             'last_hidden_state': last_hidden_state,
             'logits': logits,
             'cls_labels': cls_labels
         }
+        if self.do_lm_loss:
+            ret['lm_loss'] = out['loss']
+        return ret
 
     def training_step(self, batch, batch_idx):
         out = self.__step(batch)
-        #loss = out['lm_loss'] + out['cls_loss']
         loss = out['cls_loss']
+        if self.do_lm_loss:
+            loss += out['lm_loss']
         return loss
 
     def validation_step(self, batch, batch_idx):
         out = self.__step(batch)
-        #lm_loss = out['lm_loss']
-        cls_loss = out['cls_loss']
 
-        #loss = out['lm_loss'] + out['cls_loss']
         loss = out['cls_loss']
+        if self.do_lm_loss:
+            loss += out['lm_loss']
 
         cls_labels = out['cls_labels']
         self.val_f1(out['logits'], cls_labels)
         __kwargs = dict(on_step=False, on_epoch=True, prog_bar=True)
         self.log('val_f1', self.val_f1, **__kwargs)
-        self.log('val_loss', cls_loss, **__kwargs)
-        #self.log('val_lm_loss', lm_loss, **__kwargs)
-        #self.log('val_cls_loss', cls_loss, **__kwargs)
+        self.log('val_loss', loss, **__kwargs)
+        if self.do_lm_loss:
+            self.log('val_lm_loss', out['lm_loss'], **__kwargs)
+            self.log('val_cls_loss', out['cls_loss'], **__kwargs)
 
     def configure_callbacks(self):
         early_stop = EarlyStopping(
@@ -221,28 +224,19 @@ class OpenDataModule(pl.LightningDataModule):
         tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
         df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
 
-        tr_df, va_df = cv_split(df, args.cv)
+        tr_df, va_df = cv_split(df, self.args.cv)
 
         weights = get_class_weights(tr_df)
         self.weights = weights
 
-        self.tr_ds = OpenMLMDataset(tr_df, tokenizer, self.args.max_seq_len)
+        self.tr_ds = OpenMLMDataset(tr_df, tokenizer, self.args.max_seq_len, is_training=False)
         self.va_ds = OpenMLMDataset(va_df, tokenizer, self.args.max_seq_len, is_training=False)
 
     def train_dataloader(self):
-        from sampler import (
-            DynamicBalanceClassSampler,
-            DistributedSamplerWrapper
-        )
-
-        #train_labels = self.tr_ds.df['label'].values.tolist()
-        #sampler = DynamicBalanceClassSampler(train_labels, exp_lambda=0.98)
-
         return DataLoader(
             self.tr_ds,
             batch_size=self.batch_size,
             shuffle=True,
-            #sampler=DistributedSamplerWrapper(sampler),
             drop_last=True,
             pin_memory=True,
             num_workers=16)
@@ -270,7 +264,7 @@ class OpenMLMDataset(torch.utils.data.Dataset):
         self.rng = default_rng(seed)
         self.is_training = is_training
 
-    def random_words(self, toks):
+    def random_mask(self, toks):
         probs = self.rng.random(len(toks))
         lm_label = toks.copy()
         ix = probs < 0.15
@@ -290,16 +284,15 @@ class OpenMLMDataset(torch.utils.data.Dataset):
         label = row.label
 
         if toks.size > self.max_seq_len:
-            ovf = self.max_seq_len - toks.size
             if self.rng.random(1).item() < 0.5:
-                toks = toks[:ovf]
+                toks = toks[:self.max_seq_len]
             else:
-                toks = toks[-ovf:]
+                toks = toks[-self.max_seq_len:]
 
-        #if self.is_training:
-        #    toks, lm_label = self.random_words(toks)
-        #else:
-        lm_label = toks.copy()
+        if self.is_training:
+            toks, lm_label = self.random_mask(toks)
+        else:
+            lm_label = toks.copy()
 
         toks = torch.tensor(toks)
         lm_label = torch.tensor(lm_label)
@@ -308,8 +301,8 @@ class OpenMLMDataset(torch.utils.data.Dataset):
         attention_mask = torch.zeros(self.max_seq_len)
         attention_mask[:sz] = 1
 
-        pad_sz = self.max_seq_len-sz
-        toks = F.pad(toks, (0, pad_sz))
+        pad_sz = self.max_seq_len - sz
+        toks = F.pad(toks, (0, pad_sz), value=0)
         lm_label = F.pad(lm_label, (0, pad_sz), value=-100)
 
         return {
@@ -322,16 +315,14 @@ class OpenMLMDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.df.shape[0]
 
-def clean_text(s):
-    s = re.sub("(\\W)+"," ", s)
-    return s.strip()
-
 def prep_txt(tokenizer):
     from tqdm.auto import tqdm
-    from common import prep_cv_strified, clean_text
+    from common import prep_cv_strat, clean_text, clean_records
 
     df = pd.read_csv("/mnt/datasets/open/train.csv")
-    df = prep_cv_strified(df)
+    df_c = clean_records(df.copy())
+    df = df[df.index.isin(df_c.index)]
+    df = prep_cv_strat(df)
 
     kwargs = {
         'add_special_tokens': False,
@@ -354,7 +345,7 @@ def prep_txt(tokenizer):
         sents = [clean_text(s) for s in sents]
         sents = [s.strip() for s in sents if len(s.strip()) > 0]
         toks = tokenizer(sents, **kwargs)['input_ids']
-        toks_lst.append(np.array(toks,dtype=object))
+        toks_lst.append(np.array(toks, dtype=object))
         len_lst.append(np.array(list(map(len, toks))))
 
     df['toks'] = toks_lst

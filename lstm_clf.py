@@ -2,6 +2,7 @@ import random
 import argparse
 import re
 import os
+import pickle
 
 import torch
 import torch.nn as nn
@@ -28,7 +29,7 @@ from tqdm.auto import tqdm
 import pytorch_lightning as pl
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from common import cv_split, with_cache, get_weights
+from common import cv_split, with_cache
 from base_model import LitBaseModel
 
 from sklearn.metrics import classification_report
@@ -53,8 +54,7 @@ def get_parser():
     parser.add_argument('--cache_dir', type=str, default="./.cache", help="huggingface cahce dir")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
     # wandb related
-    parser.add_argument('--project', type=str, default='dacon-open')
-    parser.add_argument('--name', type=str, default=None)
+    parser.add_argument('--project', type=str, default='dacon-open-meta')
 
     return parser
 
@@ -64,7 +64,7 @@ class OpenSeqDataset(Dataset):
         max_seq_len = self.df['seq_len'].max()
         self.labels = labels
         self.zeros = torch.zeros(max_seq_len, dim)
-        self.is_training=is_training
+        self.is_training = is_training
 
     def __getitem__(self, idx):
         hs, seq_len = self.df.iloc[idx][['hs','seq_len']]
@@ -147,7 +147,7 @@ class LitOpenSeq(pl.LightningModule):
         self.val_recall = torchmetrics.Recall(**kwargs)
         self.val_precision = torchmetrics.Precision(**kwargs)
         bn = os.path.splitext(os.path.basename(args.base_ckpt))[0]
-        self.cache_path = os.path.join("./feat", f"feat_{bn}.pkl")
+        self.cache_path = os.path.join("./feats", f"feat_{bn}.pkl")
 
         self.lstm = nn.LSTM(
             input_size=args.input_size, # dim
@@ -164,7 +164,7 @@ class LitOpenSeq(pl.LightningModule):
         self._init_weights(self.lin)
         self._init_weights(self.clf)
 
-        self.f1_loss = F1_Loss().cuda()
+        #self.f1_loss = F1_Loss().cuda()
 
     def _init_weights(self, module):
         """Initialize the weights"""
@@ -181,31 +181,32 @@ class LitOpenSeq(pl.LightningModule):
             module.weight.data.fill_(1.0)
 
     def prepare_data(self):
-        with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
+        #with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
+        pass
 
     def load_datasets(self):
-        df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
+        #df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
+        df = pickle.load(open('./feats/feat_epoch=19-step=93839-val_loss=0.535-val_f1=0.747.pkl', 'rb'))
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        tr_df = get_weights(tr_df)
-        weights = tr_df.pop('w').values.tolist()
+        #tr_df = get_weights(tr_df)
+        #weights = tr_df.pop('w').values.tolist()
 
         tr_ds = OpenSeqDataset(tr_df, labels=tr_df['label'].values.tolist())
         va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist(), is_training=False)
-        return {'train': tr_ds, 'val': va_ds, 'weights': weights}
+        return {'train': tr_ds, 'val': va_ds}
 
     def train_dataloader(self) -> DataLoader:
-        from sampler import DistributedSampler
-
+        #from sampler import DistributedSampler
         ds = self.get_datasets()
-        w = ds['weights']
-        weighted_sampler = WeightedRandomSampler(w, len(w))
+        #w = ds['weights']
+        #weighted_sampler = WeightedRandomSampler(w, len(w))
 
         return DataLoader(
             ds['train'],
             batch_size=self.hparams.batch_size,
-            shuffle=False,
-            sampler=DistributedSampler(weighted_sampler),
+            shuffle=True,
+            #sampler=DistributedSampler(weighted_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -228,8 +229,7 @@ class LitOpenSeq(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
-        loss = self.f1_loss(logits, labels)
-        #loss = F.cross_entropy(logits, labels)
+        loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
         self.val_acc(preds, labels)
@@ -247,8 +247,7 @@ class LitOpenSeq(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
-        loss = self.f1_loss(logits, labels)
-        #loss = F.cross_entropy(logits, labels)
+        loss = F.cross_entropy(logits, labels)
         return loss
 
     def configure_optimizers(self):
@@ -299,7 +298,6 @@ def train_lstm_classifier(args):
 
     wandb_logger = WandbLogger(
         project=args.project,
-        name=args.name
     )
     trainer = pl.Trainer(
         gpus=args.gpus,
@@ -309,7 +307,7 @@ def train_lstm_classifier(args):
         max_epochs=args.max_epochs,
         checkpoint_callback=False,
         logger=wandb_logger,
-        replace_sampler_ddp=False,
+        replace_sampler_ddp=True,
         val_check_interval=0.5,
     )
     trainer.fit(model)

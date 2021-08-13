@@ -1,5 +1,6 @@
 from pathlib import Path
 import random
+import operator
 import functools
 import argparse
 import pandas as pd
@@ -110,12 +111,18 @@ class OpenDataset(Dataset):
 def clean_text(s):
     #s = re.sub("[^가-힣ㄱ-하-ㅣ]", " ", s)
     #s = re.sub('[^A-Za-z가-힣ㄱ-하-ㅣ]+', ' ', s)
-    s = re.sub("(\\W)+"," ", s)
+    try:
+        s = re.sub(r'(&amp;)', '&', s) # remove html entities
+        s = re.sub(r'(&.+;)', ' ', s) # remove html entities
+        s = re.sub(r'<br>', ' ', s)
+        s = re.sub("(\\W)+"," ", s)
+    except:
+        print(s)
+        raise
     return s.strip()
 
 def get_class_weights(df, col='label'):
     w = df.groupby(col)[col].count()
-    print(w)
     w = w.sum()/w
     return w.values.tolist()
 
@@ -132,18 +139,63 @@ def cv_split(df, cv):
     va_df = df.loc[df.cv==cv]
     return tr_df, va_df
 
+def clean_records(df):
+    # totally duplicted rows
+    cols = [c for c in df.columns if c != 'index']
+    it = filter(lambda g:len(g[1])>1, iter(df.groupby(cols)))
+    it = map(lambda g:g[1].index[1:].tolist(), it)
+    ixs_to_remove = sum(it, [])
+    df = df[~df['index'].isin(ixs_to_remove)]
+
+    # remove 계속과제
+    cols = [c for c in df.columns if c not in ['index', '제출년도', '계속과제여부']]
+    it = filter(lambda g:len(g[1])>1, iter(df.groupby(cols)))
+    it = map(lambda g:g[1].index[1:].tolist(), it)
+    ixs_to_remove = sum(it, [])
+    df = df[~df['index'].isin(ixs_to_remove)]
+
+    dontcare_depts = ['기획재정부', '문화재청', '소방청', '특허청', '행정자치부', '경찰청']
+    df = df[~df['사업_부처명'].isin(dontcare_depts)]
+
+    # all nan
+    cols = ['요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
+    idx = functools.reduce(operator.and_, [df[c].isna() for c in cols])
+    df = df[~idx]
+
+    # special 과제명
+    special_project_name = ['테스트', '인건비', '연구장비 공동활용 지원사업', '연구장비', '전문교육기관 지원', '연구장비공동활용지원사업','시설비', '시설보수 및 장비교체', '시설비','시설보수 및 장비교체', '보안과제정보']
+    df = df[~df['과제명'].isin(special_project_name)]
+    df = df[~df['과제명'].str.contains('평가관리비')]
+
+    df[df['요약문_연구목표'].isin(['0', '재조사'])] = np.nan
+    df[df['요약문_연구내용'].isin(['0', '재조사','·'])] = np.nan
+    df[df['요약문_기대효과']=='0'] = np.nan
+
+    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과', '요약문_한글키워드', '요약문_영문키워드']
+    df[cols] = df[cols].fillna('')
+
+    cols_c = [c+'_cleaned' for c in cols]
+    for c, cc in zip(cols, cols_c):
+        df[cc] = df[c].apply(clean_text)
+
+    it = filter(lambda g:len(g[1])>1, iter(df.groupby(cols_c)))
+    it = map(lambda g:g[1].index[1:].tolist(), it)
+    ixs_to_remove = sum(it, [])
+    df = df[~df['index'].isin(ixs_to_remove)]
+
+    return df
+
 def prep_txt(df, include_keywords=True, include_english=True, is_test=False):
 
-    cols = ['과제명', '요약문_연구목표', '요약문_연구내용', '요약문_기대효과']
+    # for the cases where keywords are not NA, only two rows' label !=0 so we just ignore them
+
     if include_keywords:
-        cols += ['요약문_한글키워드']
-        if include_english:
-            cols += ['요약문_영문키워드']
+        cols += ['요약문_한글키워드', '요약문_영문키워드']
 
     if is_test:
         df = df[cols + ['index']].copy()
     else:
-        df = df[cols + ['index','label']].copy()
+        df = df[cols + ['index', 'label']].copy()
     df.fillna(' ', inplace=True)
 
     df['data'] = df[cols[0]]
@@ -154,10 +206,11 @@ def prep_txt(df, include_keywords=True, include_english=True, is_test=False):
 
     return df
 
-def prep_cv_strified(df, cv_size=5, seed=42):
-    skf = StratifiedKFold(n_splits=cv_size,shuffle=True,random_state=seed)
-    for ix, (train_index, test_index) in enumerate(skf.split(np.zeros(len(df.label)), df.label)):
-        df.loc[test_index, 'cv'] = ix
+def prep_cv_strat(df, cv_size=5, seed=42):
+    df['cv'] = -1
+    skf = StratifiedKFold(n_splits=cv_size, shuffle=True, random_state=seed)
+    for _cv, (_, test_index) in enumerate(skf.split(np.zeros(len(df.label)), df.label)):
+        df.iloc[test_index, df.columns.get_loc('cv')] = _cv
     df['cv'] = df.cv.astype(int)
     return df
 

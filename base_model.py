@@ -321,6 +321,7 @@ class LitBaseModel(pl.LightningModule):
         __kwargs = {'num_classes': self.hparams.num_classes, 'average':'macro'}
 
         self.loss_fct = None
+        self.use_class_weight = False
         self.val_f1 = torchmetrics.F1(**__kwargs)
         self.val_acc = torchmetrics.Accuracy(**__kwargs)
         self.val_recall = torchmetrics.Recall(**__kwargs)
@@ -393,7 +394,10 @@ class LitBaseModel(pl.LightningModule):
         self._datasets = {'train': tr_ds, 'val': va_ds}
         weight = get_class_weights(tr_df)
 
-        self.loss_fct = nn.CrossEntropyLoss(weight=torch.FloatTensor(weight))
+        if self.use_class_weight:
+            self.loss_fct = nn.CrossEntropyLoss(weight=torch.FloatTensor(weight))
+        else:
+            self.loss_fct = nn.CrossEntropyLoss()
 
     def prepare_data(self):
         with_cache(prep, self.hparams.cache_path)(self.hparams)

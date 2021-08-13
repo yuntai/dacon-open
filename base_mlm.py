@@ -221,7 +221,7 @@ class OpenDataModule(pl.LightningDataModule):
         tokenizer = AutoTokenizer.from_pretrained(self.args.base_model)
         df = with_cache(prep_txt, self.prep_cache_path)(tokenizer)
 
-        tr_df, va_df = cv_split(df, args.cv)
+        tr_df, va_df = cv_split(df, self.args.cv)
 
         weights = get_class_weights(tr_df)
         self.weights = weights

@@ -33,7 +33,18 @@ from common import cv_split, with_cache
 from base_model import LitBaseModel
 
 from sklearn.metrics import classification_report
-from  torch.nn.utils.rnn import pack_padded_sequence
+from torch.nn.utils.rnn import pack_padded_sequence
+
+def isin_ipython():
+    try:
+        return get_ipython().__class__.__name__ == 'TerminalInteractiveShell'
+    except NameError:
+        return False      # Probably standard Python interpreter
+
+def get_class_weights(df, col='label'):
+    w = df.groupby(col)[col].count()
+    w = w.sum()/w
+    return w.values.tolist()
 
 def get_parser():
 
@@ -44,13 +55,12 @@ def get_parser():
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
+    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/efficient-galaxy-79/epoch=19-step=93839-val_loss=0.535-val_f1=0.747.ckpt"
     parser.add_argument('--base_ckpt', type=str, default=CKPT)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'xlm-roberta-large', 'monologg/kobert', 'monologg/distilkobert']
     parser.add_argument('--cache_dir', type=str, default="./.cache", help="huggingface cahce dir")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
     # wandb related
@@ -131,7 +141,7 @@ class LitOpenSeq(pl.LightningModule):
         self.save_hyperparameters(args)
         self._datasets = None
 
-        self.num_classes = 46
+        self.num_classes = 45
         kwargs = {'num_classes': self.num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
@@ -155,6 +165,7 @@ class LitOpenSeq(pl.LightningModule):
         self._init_weights(self.lin)
         self._init_weights(self.clf)
 
+        self.loss_fct = None
         #self.f1_loss = F1_Loss().cuda()
 
     def _init_weights(self, module):
@@ -172,32 +183,28 @@ class LitOpenSeq(pl.LightningModule):
             module.weight.data.fill_(1.0)
 
     def prepare_data(self):
-        #with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
-        pass
+        with_cache(self.cache_path, LitBaseModel.extract_feature)(self.hparams.base_ckpt)
 
     def load_datasets(self):
-        #df = with_cache(LitBaseModel.extract_feature, self.cache_path)(self.hparams.base_ckpt)
-        df = pickle.load(open('./feats/feat_epoch=19-step=93839-val_loss=0.535-val_f1=0.747.pkl', 'rb'))
+        df = with_cache(self.cache_path, LitBaseModel.extract_feature)(self.hparams.base_ckpt)
+        df = df[df.label > 0]
+        df.label -= 1
+
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        #tr_df = get_weights(tr_df)
-        #weights = tr_df.pop('w').values.tolist()
+        class_weights = get_class_weights(tr_df)
+        self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).cuda())
 
         tr_ds = OpenSeqDataset(tr_df, labels=tr_df['label'].values.tolist())
         va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist(), is_training=False)
         return {'train': tr_ds, 'val': va_ds}
 
     def train_dataloader(self) -> DataLoader:
-        #from sampler import DistributedSampler
         ds = self.get_datasets()
-        #w = ds['weights']
-        #weighted_sampler = WeightedRandomSampler(w, len(w))
-
         return DataLoader(
             ds['train'],
             batch_size=self.hparams.batch_size,
             shuffle=True,
-            #sampler=DistributedSampler(weighted_sampler),
             pin_memory=True,
             num_workers=16)
 
@@ -220,7 +227,8 @@ class LitOpenSeq(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.loss_fct(logits, labels)
+        #loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
         self.val_acc(preds, labels)
@@ -238,7 +246,8 @@ class LitOpenSeq(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.loss_fct(logits, labels)
+        #loss = F.cross_entropy(logits, labels)
         return loss
 
     def configure_optimizers(self):
@@ -284,7 +293,30 @@ class LitOpenSeq(pl.LightningModule):
         lr_monitor = LearningRateMonitor(logging_interval='step')
         return [early_stop_callback_f1, mc, lr_monitor]
 
-def train_lstm_classifier(args):
+def predict(ckpt_path):
+    assert ckpt_path is not None or name is not None
+
+    model = LitOpenSeq.load_from_checkpoint(ckpt_path)
+    trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
+
+    p = trainer.predict(dataloaders=model.val_dataloader(), return_predictions=True)
+    logits, labels = zip(*map(operator.itemgetter('logits', 'labels'), p))
+    logits = torch.cat(logits).cpu()
+    labels = torch.cat(labels).cpu()
+    preds = logits.argmax(dim=-1)
+    res = classification_report(labels, preds, output_dict=True)
+
+    df = pd.DataFrame()
+    for i in range(46):
+        df = df.append(res[str(i)], ignore_index=True)
+
+    return {
+        'report': df,
+        'logits': logits,
+        'labels': labels
+    }
+
+def train(args):
     model = LitOpenSeq(args)
 
     trainer = pl.Trainer(
@@ -300,7 +332,7 @@ def train_lstm_classifier(args):
     )
     trainer.fit(model)
 
-if __name__ == '__main__':
+if __name__ == '__main__' and not isin_ipython():
     parser = get_parser()
     parser = LitOpenSeq.add_model_specific_args(parser)
     args = parser.parse_args()

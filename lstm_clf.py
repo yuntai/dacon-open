@@ -3,6 +3,7 @@ import argparse
 import re
 import os
 import pickle
+import logging
 
 import torch
 import torch.nn as nn
@@ -35,26 +36,26 @@ from base_model import LitBaseModel
 from sklearn.metrics import classification_report
 from  torch.nn.utils.rnn import pack_padded_sequence
 
-def get_parser():
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
+CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
+def get_parser():
     parser = argparse.ArgumentParser()
-    #parser.add_argument('--max_seq_len', type=int, default=250)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--max_epochs', type=int, default=20)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
     parser.add_argument('--base_ckpt', type=str, default=CKPT)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
-    MODELS = [ 'bert-base-multilingual-cased', 'xlm-roberta-base', 'xlm-roberta-large', 'monologg/kobert', 'monologg/distilkobert']
     parser.add_argument('--cache_dir', type=str, default="./.cache", help="huggingface cahce dir")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
     # wandb related
-    parser.add_argument('--project', type=str, default='dacon-open-meta')
+    parser.add_argument('--project', type=str, default='dacon-open-lstm')
 
     return parser
 
@@ -255,34 +256,36 @@ class LitOpenSeq(pl.LightningModule):
 
         return {
             "optimizer": optimizer,
-            "lr_scheduler": ReduceLROnPlateau(optimizer),
+            "lr_scheduler": ReduceLROnPlateau(optimizer, mode='max'),
             "monitor": "val_f1"
         }
 
     def configure_callbacks(self):
+        #early_stop_callback = EarlyStopping(
+        #    monitor='val_loss',
+        #    min_delta=0.00,
+        #    patience=3,
+        #    verbose=False,
+        #    mode='min'
+        #)
         early_stop_callback = EarlyStopping(
-            monitor='val_loss',
-            min_delta=0.00,
-            patience=3,
-            verbose=False,
-            mode='min'
-        )
-        early_stop_callback_f1 = EarlyStopping(
             monitor='val_f1',
             min_delta=0.00,
             patience=5,
             verbose=False,
             mode='max'
         )
+        exp_name = self.trainer.logger.experiment.name
+        logger.info(f"{exp_name=}")
         mc = ModelCheckpoint(
-            dirpath=f"./res/lstm_seq",
-            monitor="val_loss",
+            dirpath=f"./res/lstm_seq/{exp_name}",
+            monitor="val_f1",
             save_top_k=3,
-            filename='{epoch}-{step}-{val_loss:.3f}-{val_f1:.3f}',
-            mode='min'
+            filename='{epoch}-{step}-{val_f1:.3f}-{val_loss:.3f}',
+            mode='max'
         )
         lr_monitor = LearningRateMonitor(logging_interval='step')
-        return [early_stop_callback_f1, mc, lr_monitor]
+        return [early_stop_callback, mc, lr_monitor]
 
 def train_lstm_classifier(args):
     model = LitOpenSeq(args)

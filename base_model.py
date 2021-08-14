@@ -196,9 +196,7 @@ def get_parser():
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--warmup_steps', type=int, default=0)
-
-    #parser.add_argument('--num_classes', type=int, default=46)
-
+    parser.add_argument('--num_classes', type=int, default=2)
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
@@ -385,6 +383,8 @@ class LitBaseModel(pl.LightningModule):
 
     def setup(self, stage: Optional[str] = None):
         df = with_cache(prep, self.hparams.cache_path)(self.hparams)
+        if self.hparams.num_classes = 2:
+            df.loc[df.label > 0, 'label'] = 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
@@ -489,7 +489,7 @@ if __name__ == '__main__' and not isin_ipython():
     parser = get_parser()
     args = parser.parse_args()
     args.dataroot = Path(args.dataroot)
-    args.num_classes = 46
+    args.num_classes = 2
 
     pl.seed_everything(args.seed)
 

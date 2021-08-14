@@ -91,15 +91,6 @@ class LitOpenSeq(pl.LightningModule):
         return parent_parser
 
     @staticmethod
-    def load_from_ckpt(ckpt_path):
-        ckpt = torch.load(ckpt_path)
-        args = argparse.Namespace(**ckpt['hyper_parameters'])
-        model = LitOpenSeq(args)
-        state_dict = ckpt['state_dict']
-        model.load_state_dict(state_dict)
-        return model, args
-
-    @staticmethod
     def submission():
         base_ckpt = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
         lstm_ckpt = "./res/lstm_seq/epoch=5-step=13072-val_loss=0.508-val_f1=0.752.ckpt"
@@ -296,9 +287,6 @@ class LitOpenSeq(pl.LightningModule):
 def train_lstm_classifier(args):
     model = LitOpenSeq(args)
 
-    wandb_logger = WandbLogger(
-        project=args.project,
-    )
     trainer = pl.Trainer(
         gpus=args.gpus,
         amp_level='O2',
@@ -306,7 +294,7 @@ def train_lstm_classifier(args):
         accelerator='ddp',
         max_epochs=args.max_epochs,
         checkpoint_callback=False,
-        logger=wandb_logger,
+        logger=WandbLogger(project=args.project),
         replace_sampler_ddp=True,
         val_check_interval=0.5,
     )

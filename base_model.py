@@ -191,11 +191,11 @@ def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--max_seq_len', type=int, default=250)
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--max_epochs', type=int, default=25)
+    parser.add_argument('--max_epochs', type=int, default=20)
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--warmup_steps', type=int, default=600)
+    parser.add_argument('--warmup_steps', type=int, default=0)
 
     #parser.add_argument('--num_classes', type=int, default=46)
 

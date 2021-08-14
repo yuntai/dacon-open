@@ -143,8 +143,7 @@ class LitOpenSeq(pl.LightningModule):
         self.save_hyperparameters(args)
         self._datasets = None
 
-        self.num_classes = 45
-        kwargs = {'num_classes': self.num_classes, 'average':'macro'}
+        kwargs = {'num_classes': self.hparams.num_classes, 'average':'macro'}
         self.val_f1 = torchmetrics.F1(**kwargs)
         self.val_acc = torchmetrics.Accuracy(**kwargs)
         self.val_recall = torchmetrics.Recall(**kwargs)
@@ -162,7 +161,7 @@ class LitOpenSeq(pl.LightningModule):
         self.activation = nn.ReLU()
         self.dropout = nn.Dropout(args.dropout_prob)
         self.lin = nn.Linear(args.hidden_size, 512)
-        self.clf = nn.Linear(512, self.num_classes)
+        self.clf = nn.Linear(512, self.hparams.num_classes)
 
         self._init_weights(self.lin)
         self._init_weights(self.clf)
@@ -189,13 +188,19 @@ class LitOpenSeq(pl.LightningModule):
 
     def load_datasets(self):
         df = with_cache(self.cache_path, LitBaseModel.extract_feature)(self.hparams.base_ckpt)
-        df = df[df.label > 0]
-        df.label -= 1
+        if self.hparams.num_classes == 2:
+            df = df.loc[df.label > 0, 'label'] = 1
+        elif self.hparams.num_classes == 45:
+            df = df[df.label > 0]
+            df.label -= 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
         class_weights = get_class_weights(tr_df)
-        self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).cuda())
+        assert len(class_weights) == self.hparams.num_classes
+
+        dev = next(self.parameters()).dev
+        self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).to(dev))
 
         tr_ds = OpenSeqDataset(tr_df, labels=tr_df['label'].values.tolist())
         va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist(), is_training=False)
@@ -340,6 +345,8 @@ if __name__ == '__main__' and not isin_ipython():
     parser = get_parser()
     parser = LitOpenSeq.add_model_specific_args(parser)
     args = parser.parse_args()
+    args.num_classes = 2
+
     pl.seed_everything(args.seed)
 
     train_lstm_classifier(args)

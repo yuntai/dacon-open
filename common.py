@@ -271,12 +271,13 @@ def get_tokenizer(base_model, **kwargs):
 
     return tokenizer
 
-def with_cache(func, cache_path):
+def with_cache(cache_path, func=None):
     def __inner(*args, **kwargs):
         if Path(cache_path).exists():
             print(f"CACHE FOUND {cache_path}")
             df = pd.read_pickle(cache_path)
         else:
+            assert func is not None
             print(f"CACHE NOT FOUND {cache_path}")
             df = func(*args, **kwargs)
             print(f"saving to {cache_path} ...")
@@ -302,9 +303,3 @@ def get_dataset(df, is_test=False):
     if not is_test:
         y = df['label'].values.tolist()
     return OpenDataset(X, y)
-
-def isin_ipython():
-    try:
-        return get_ipython().__class__.__name__ == 'TerminalInteractiveShell'
-    except NameError:
-        return False      # Probably standard Python interpreter

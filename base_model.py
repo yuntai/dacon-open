@@ -226,16 +226,16 @@ class BaseClassifier(nn.Module):
 
         self.activation = nn.ReLU()
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size*2, args.num_classes)
+        self.classifier = nn.Linear(config.hidden_size, args.num_classes)
 
         self.classifier.weight.data.normal_(mean=0.0, std=config.initializer_range)
         self.classifier.bias.data.zero_()
 
     def forward(self, input_ids=None, token_type_ids=None, attention_mask=None):
         output = self.m(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
-        hidden0 = output['last_hidden_state'].mean(dim=1)
-        hidden1 = output['last_hidden_state'].max(dim=1)[0]
-        hidden = torch.cat([hidden0, hidden1], dim=-1)
+        hidden = output['last_hidden_state'].mean(dim=1)
+        #hidden1 = output['last_hidden_state'].max(dim=1)[0]
+        #hidden = torch.cat([hidden0, hidden1], dim=-1)
 
         x = self.activation(hidden)
         x = self.dropout(x)

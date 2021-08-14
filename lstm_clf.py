@@ -2,6 +2,7 @@ import random
 import argparse
 import re
 import os
+import operator
 import pickle
 import logging
 
@@ -32,9 +33,11 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from common import cv_split, with_cache
 from base_model import LitBaseModel
+from pytorch_lightning.trainer.states import TrainerFn
 
 from sklearn.metrics import classification_report
 from torch.nn.utils.rnn import pack_padded_sequence
+from common import F1_Loss
 
 def isin_ipython():
     try:
@@ -50,7 +53,8 @@ def get_class_weights(df, col='label'):
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/epoch=10-step=51611-val_loss=0.441-val_f1=0.739.ckpt"
+CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/efficient-galaxy-79/epoch=19-step=93839-val_loss=0.535-val_f1=0.747.ckpt"
+
 def get_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=32)
@@ -65,6 +69,7 @@ def get_parser():
     parser.add_argument('--learning_rate', default=3e-5, type=float, help='The initial learning rate for Adam.')
     parser.add_argument('--cache_dir', type=str, default="./.cache", help="huggingface cahce dir")
     parser.add_argument('--dataroot', type=str, default="/mnt/datasets/open")
+    parser.add_argument('--num_classes', type=int, default=46)
     # wandb related
     parser.add_argument('--project', type=str, default='dacon-open-lstm')
 
@@ -80,8 +85,8 @@ class OpenSeqDataset(Dataset):
 
     def __getitem__(self, idx):
         hs, seq_len = self.df.iloc[idx][['hs','seq_len']]
-        if self.is_training:
-            random.shuffle(hs)
+        #if self.is_training:
+        #    random.shuffle(hs)
         hs = torch.cat([hs, self.zeros[seq_len:]])
         ret = (hs, seq_len)
         if self.labels:
@@ -98,8 +103,9 @@ class LitOpenSeq(pl.LightningModule):
         parser.add_argument('--hidden_size', type=int, default=1024)
         parser.add_argument('--input_size', type=int, default=768)
         parser.add_argument('--dropout_prob', type=float, default=0.1)
-        parser.add_argument('--num_layers', type=int, default=2)
+        parser.add_argument('--num_layers', type=int, default=4)
         parser.add_argument('--initializer_range', type=float, default=0.02)
+        parser.add_argument('--loss_fct', choices=['cross_entropy', 'f1_loss'], default='cross_entropy')
         return parent_parser
 
     @staticmethod
@@ -148,26 +154,28 @@ class LitOpenSeq(pl.LightningModule):
         self.val_acc = torchmetrics.Accuracy(**kwargs)
         self.val_recall = torchmetrics.Recall(**kwargs)
         self.val_precision = torchmetrics.Precision(**kwargs)
-        bn = os.path.splitext(os.path.basename(args.base_ckpt))[0]
+        bn = os.path.splitext(os.path.basename(self.hparams.base_ckpt))[0]
         self.cache_path = os.path.join("./feats", f"feat_{bn}.pkl")
 
         self.lstm = nn.LSTM(
-            input_size=args.input_size, # dim
-            hidden_size=args.hidden_size,
+            input_size=self.hparams.input_size, # dim
+            hidden_size=self.hparams.hidden_size,
             batch_first=True,
-            num_layers=args.num_layers,
+            num_layers=self.hparams.num_layers,
             bidirectional=True)
 
         self.activation = nn.ReLU()
-        self.dropout = nn.Dropout(args.dropout_prob)
-        self.lin = nn.Linear(args.hidden_size, 512)
+        self.dropout = nn.Dropout(self.hparams.dropout_prob)
+        self.lin = nn.Linear(self.hparams.hidden_size, 512)
         self.clf = nn.Linear(512, self.hparams.num_classes)
 
         self._init_weights(self.lin)
         self._init_weights(self.clf)
 
-        self.loss_fct = None
-        #self.f1_loss = F1_Loss().cuda()
+        if self.hparams.loss_fct == 'f1_loss':
+            self.loss_fct = F1_Loss(self.hparams.num_classes).cuda()
+        else:
+            self.loss_fct = CrossEntropyLoss()
 
     def _init_weights(self, module):
         """Initialize the weights"""
@@ -188,22 +196,25 @@ class LitOpenSeq(pl.LightningModule):
 
     def load_datasets(self):
         df = with_cache(self.cache_path, LitBaseModel.extract_feature)(self.hparams.base_ckpt)
+
         if self.hparams.num_classes == 2:
-            df = df.loc[df.label > 0, 'label'] = 1
+            df.loc[df.label > 0, 'label'] = 1
         elif self.hparams.num_classes == 45:
             df = df[df.label > 0]
             df.label -= 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        class_weights = get_class_weights(tr_df)
-        assert len(class_weights) == self.hparams.num_classes
+        if self.hparams.loss_fct == 'cross_entropy':
+            class_weights = get_class_weights(tr_df)
+            assert len(class_weights) == self.hparams.num_classes
 
-        dev = next(self.parameters()).dev
-        self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).to(dev))
+            dev = next(self.parameters()).device
+            self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).to(dev))
 
         tr_ds = OpenSeqDataset(tr_df, labels=tr_df['label'].values.tolist())
         va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist(), is_training=False)
+
         return {'train': tr_ds, 'val': va_ds}
 
     def train_dataloader(self) -> DataLoader:
@@ -225,17 +236,17 @@ class LitOpenSeq(pl.LightningModule):
         return self._datasets
 
     def forward(self, batch):
-        x, seq_len = batch
+        x, seq_len, labels = batch
         x = x.cuda()
         seq_len = seq_len.cuda()
         logits = self.__step(x, seq_len)
-        return logits.argmax(dim=1)
+        return {'logits': logits, 'labels': labels}
+        #return logits.argmax(dim=1), labels
 
     def validation_step(self, batch, batch_idx):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
         loss = self.loss_fct(logits, labels)
-        #loss = F.cross_entropy(logits, labels)
         preds = logits.argmax(dim=1)
 
         self.val_acc(preds, labels)
@@ -254,7 +265,6 @@ class LitOpenSeq(pl.LightningModule):
         x, seq_len, labels = batch
         logits = self.__step(x, seq_len)
         loss = self.loss_fct(logits, labels)
-        #loss = F.cross_entropy(logits, labels)
         return loss
 
     def configure_optimizers(self):
@@ -283,8 +293,12 @@ class LitOpenSeq(pl.LightningModule):
         #    verbose=False,
         #    mode='min'
         #)
+        self.print("============ STATE=", self.trainer.state.fn)
+        if self.trainer.state.fn == TrainerFn.PREDICTING:
+            return []
+
         early_stop_callback = EarlyStopping(
-            monitor='val_f1',
+            monitor='val_acc',
             min_delta=0.00,
             patience=5,
             verbose=False,
@@ -294,7 +308,7 @@ class LitOpenSeq(pl.LightningModule):
         logger.info(f"{exp_name=}")
         mc = ModelCheckpoint(
             dirpath=f"./res/lstm_seq/{exp_name}",
-            monitor="val_f1",
+            monitor="val_acc",
             save_top_k=3,
             filename='{epoch}-{step}-{val_f1:.3f}-{val_loss:.3f}',
             mode='max'
@@ -305,10 +319,11 @@ class LitOpenSeq(pl.LightningModule):
 def predict(ckpt_path):
     assert ckpt_path is not None or name is not None
 
+    ckpt_path = 'a.ckpt'
     model = LitOpenSeq.load_from_checkpoint(ckpt_path)
     trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
 
-    p = trainer.predict(dataloaders=model.val_dataloader(), return_predictions=True)
+    p = trainer.predict(model, dataloaders=model.val_dataloader(), return_predictions=True)
     logits, labels = zip(*map(operator.itemgetter('logits', 'labels'), p))
     logits = torch.cat(logits).cpu()
     labels = torch.cat(labels).cpu()
@@ -316,7 +331,7 @@ def predict(ckpt_path):
     res = classification_report(labels, preds, output_dict=True)
 
     df = pd.DataFrame()
-    for i in range(46):
+    for i in range(model.hparams.num_classes):
         df = df.append(res[str(i)], ignore_index=True)
 
     return {
@@ -324,6 +339,37 @@ def predict(ckpt_path):
         'logits': logits,
         'labels': labels
     }
+
+def dummy():
+    ckpt_path = 'a.ckpt'
+    model = LitOpenSeq.load_from_checkpoint(ckpt_path)
+    trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
+    p = trainer.predict(model, dataloaders=model.val_dataloader(), return_predictions=True)
+
+    logits, labels = zip(*map(operator.itemgetter('logits', 'labels'), p))
+    logits = torch.cat(logits).cpu()
+    labels = torch.cat(labels).cpu()
+    preds = logits.argmax(dim=-1)
+    print(classification_report(labels, preds))
+
+    ixs = torch.nonzero(preds0>0).squeeze().tolist()
+
+    org_dataset = model.get_datasets()['val']
+    ds = torch.utils.data.Subset(org_dataset, ixs)
+    dl = DataLoader(ds, batch_size=32, shuffle=False)
+
+    model2 = LitOpenSeq.load_from_checkpoint('b.ckpt')
+
+    trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
+    p2 = trainer.predict(model2, dataloaders=dl, return_predictions=True)
+    logits, _ = zip(*map(operator.itemgetter('logits', 'labels'), p2))
+    logits = torch.cat(logits).cpu()
+    preds2 = logits.argmax(dim=-1)
+
+    preds[ixs] = preds2 + 1
+
+    print(classification_report(labels, preds))
+
 
 def train(args):
     model = LitOpenSeq(args)
@@ -345,9 +391,7 @@ if __name__ == '__main__' and not isin_ipython():
     parser = get_parser()
     parser = LitOpenSeq.add_model_specific_args(parser)
     args = parser.parse_args()
-    args.num_classes = 2
 
     pl.seed_everything(args.seed)
 
-    train_lstm_classifier(args)
-#LitOpenSeq.submission()
+    train(args)

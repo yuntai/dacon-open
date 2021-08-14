@@ -5,19 +5,6 @@
 - shorten max_len_seq (seems overfitting)
 - pooling sweep
 
-AUG 10
-claend dataset
-AUG 11
-SMOTE
-AUG 12
-LSTM/TRANSFORMER(?)
-AUG 13
-TRAIN WHOLE DATA
-AUG 14
-LB 
-AUG 15
-AUG 16
-
 #### (A) check blanced batch/trimming
 - [o] check MolBert (%collate_fn)
 - [o] check distribtedwrapper 
@@ -70,3 +57,9 @@ https://web.kamihq.com/web/viewer.html?state=%7B%22ids%22%3A%5B%2218Uer9efFKPzvr
 
 # others
 - think about `sampler_test.py`
+
+## FINAL
+# train separately for 0/1
+- base 0/1 - classifier 0/1
+- base all - classifier 45
+# use bert also

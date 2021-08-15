@@ -9,6 +9,7 @@ import functools
 from pathlib import Path
 from typing import Optional
 from tqdm.auto import tqdm
+from pytorch_lightning.utilities import rank_zero_only
 
 import pandas as pd
 import numpy as np
@@ -158,9 +159,6 @@ def cv_split(df, cv):
     return tr_df, va_df
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
 
 # create torch dataset
 class OpenDataset(Dataset):
@@ -383,19 +381,21 @@ class LitBaseModel(pl.LightningModule):
 
     def setup(self, stage: Optional[str] = None):
         df = with_cache(prep, self.hparams.cache_path)(self.hparams)
-        if self.hparams.num_classes = 2:
+        if self.hparams.num_classes == 2:
             df.loc[df.label > 0, 'label'] = 1
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        assert sorted(tr_df.label.unique().tolist()) == list(range(46))
-        assert sorted(va_df.label.unique().tolist()) == list(range(46))
+        assert sorted(tr_df.label.unique().tolist()) == list(range(self.hparams.num_classes))
+        assert sorted(va_df.label.unique().tolist()) == list(range(self.hparams.num_classes))
 
         tr_ds = get_dataset(tr_df)
         va_ds = get_dataset(va_df)
 
         self._datasets = {'train': tr_ds, 'val': va_ds}
         weight = get_class_weights(tr_df)
+
+        assert len(weight) == self.hparams.num_classes
 
         if self.use_class_weight:
             self.loss_fct = nn.CrossEntropyLoss(weight=torch.FloatTensor(weight))
@@ -433,7 +433,8 @@ class LitBaseModel(pl.LightningModule):
         )
 
         exp_name = self.trainer.logger.experiment.name
-        logger.info(f"{exp_name=}")
+        self.print(f"{exp_name=}")
+
         checkpoint = ModelCheckpoint(
             dirpath=f"./res/base_model={self.hparams.base_model}&max_seq_len={self.hparams.max_seq_len}/{exp_name}",
             monitor="val_f1",

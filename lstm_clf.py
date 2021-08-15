@@ -53,7 +53,7 @@ def get_class_weights(df, col='label'):
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/efficient-galaxy-79/epoch=19-step=93839-val_loss=0.535-val_f1=0.747.ckpt"
+#CKPT = "./res/base_model=xlm-roberta-base&max_seq_len=250/efficient-galaxy-79/epoch=19-step=93839-val_loss=0.535-val_f1=0.747.ckpt"
 
 def get_parser():
     parser = argparse.ArgumentParser()
@@ -62,7 +62,7 @@ def get_parser():
     parser.add_argument('--gpus', type=int, default=2)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--base_ckpt', type=str, default=CKPT)
+    parser.add_argument('--base_ckpt', type=str)
 
     parser.add_argument("--weight_decay", default=0.01, type=float, help="Weight decay if we apply some.")
     parser.add_argument("--adam_epsilon", default=1e-8, type=float, help="Epsilon for Adam optimizer.")
@@ -172,10 +172,10 @@ class LitOpenSeq(pl.LightningModule):
         self._init_weights(self.lin)
         self._init_weights(self.clf)
 
-        if self.hparams.loss_fct == 'f1_loss':
-            self.loss_fct = F1_Loss(self.hparams.num_classes).cuda()
-        else:
-            self.loss_fct = CrossEntropyLoss()
+        #if self.hparams.loss_fct == 'f1_loss':
+        #    self.loss_fct = F1_Loss(self.hparams.num_classes).cuda()
+        #else:
+        self.loss_fct = CrossEntropyLoss()
 
     def _init_weights(self, module):
         """Initialize the weights"""
@@ -205,12 +205,11 @@ class LitOpenSeq(pl.LightningModule):
 
         tr_df, va_df = cv_split(df, self.hparams.cv)
 
-        if self.hparams.loss_fct == 'cross_entropy':
-            class_weights = get_class_weights(tr_df)
-            assert len(class_weights) == self.hparams.num_classes
+        class_weights = get_class_weights(tr_df)
+        assert len(class_weights) == self.hparams.num_classes
 
-            dev = next(self.parameters()).device
-            self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).to(dev))
+        dev = next(self.parameters()).device
+        self.loss_fct = CrossEntropyLoss(weight=torch.tensor(class_weights).to(dev))
 
         tr_ds = OpenSeqDataset(tr_df, labels=tr_df['label'].values.tolist())
         va_ds = OpenSeqDataset(va_df, labels=va_df['label'].values.tolist(), is_training=False)
@@ -236,11 +235,11 @@ class LitOpenSeq(pl.LightningModule):
         return self._datasets
 
     def forward(self, batch):
-        x, seq_len, labels = batch
+        x, seq_len = batch
         x = x.cuda()
         seq_len = seq_len.cuda()
         logits = self.__step(x, seq_len)
-        return {'logits': logits, 'labels': labels}
+        return {'logits': logits}
         #return logits.argmax(dim=1), labels
 
     def validation_step(self, batch, batch_idx):
@@ -319,8 +318,7 @@ class LitOpenSeq(pl.LightningModule):
 def predict(ckpt_path):
     assert ckpt_path is not None or name is not None
 
-    ckpt_path = 'a.ckpt'
-    model = LitOpenSeq.load_from_checkpoint(ckpt_path)
+    model = LitOpenSeq.load_from_checkpoint(__x(ckpt_path))
     trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
 
     p = trainer.predict(model, dataloaders=model.val_dataloader(), return_predictions=True)
@@ -328,6 +326,7 @@ def predict(ckpt_path):
     logits = torch.cat(logits).cpu()
     labels = torch.cat(labels).cpu()
     preds = logits.argmax(dim=-1)
+    print(classification_report(labels, preds))
     res = classification_report(labels, preds, output_dict=True)
 
     df = pd.DataFrame()
@@ -340,33 +339,42 @@ def predict(ckpt_path):
         'labels': labels
     }
 
+def __x(ckpt):
+    fn = ckpt + ".fixed"
+    st = torch.load(ckpt)
+    st['state_dict'].pop('loss_fct.weight')
+    torch.save(st, fn)
+    return fn
+
 def dummy():
-    ckpt_path = 'a.ckpt'
-    model = LitOpenSeq.load_from_checkpoint(ckpt_path)
+    fn = __x('./res/lstm_seq/rural-shadow-13/epoch=4-step=9804-val_f1=0.883-val_loss=0.690.ckpt')
+    model = LitOpenSeq.load_from_checkpoint(fn)
     trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
     p = trainer.predict(model, dataloaders=model.val_dataloader(), return_predictions=True)
 
     logits, labels = zip(*map(operator.itemgetter('logits', 'labels'), p))
     logits = torch.cat(logits).cpu()
     labels = torch.cat(labels).cpu()
-    preds = logits.argmax(dim=-1)
-    print(classification_report(labels, preds))
+    preds0 = logits.argmax(dim=-1)
+    print(classification_report(labels, preds0))
 
     ixs = torch.nonzero(preds0>0).squeeze().tolist()
 
-    org_dataset = model.get_datasets()['val']
-    ds = torch.utils.data.Subset(org_dataset, ixs)
-    dl = DataLoader(ds, batch_size=32, shuffle=False)
+    fn = __x('./res/lstm_seq/radiant-forest-6/epoch=10-step=4377-val_f1=0.841-val_loss=0.957.ckpt')
+    model2 = LitOpenSeq.load_from_checkpoint(fn)
+    df = with_cache(model2.cache_path, LitBaseModel.extract_feature)(model2.hparams.base_ckpt)
+    _, va_df = cv_split(df, model2.hparams.cv)
+    va_ds = OpenSeqDataset(va_df, is_training=False)
 
-    model2 = LitOpenSeq.load_from_checkpoint('b.ckpt')
+    ds = torch.utils.data.Subset(va_ds, ixs)
+    dl = DataLoader(ds, batch_size=32, shuffle=False)
 
     trainer = pl.Trainer(gpus=1, amp_level='O2', precision=16)
     p2 = trainer.predict(model2, dataloaders=dl, return_predictions=True)
-    logits, _ = zip(*map(operator.itemgetter('logits', 'labels'), p2))
-    logits = torch.cat(logits).cpu()
+    logits = torch.cat(list(map(operator.itemgetter('logits'), p2))).cpu()
     preds2 = logits.argmax(dim=-1)
 
-    preds[ixs] = preds2 + 1
+    preds0[ixs] = preds2 + 1
 
     print(classification_report(labels, preds))
 

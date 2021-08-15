@@ -259,7 +259,7 @@ class LitBaseModel(pl.LightningModule):
         ds = get_dataset(df, is_test=is_test)
         dl = DataLoader(ds, batch_size=128, shuffle=False)
 
-        logging.info("extracting feature...")
+        logger.info("extracting feature...")
         hidden_states = []
         with torch.no_grad():
             for batch in tqdm(dl):
